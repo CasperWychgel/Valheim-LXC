@@ -1,0 +1,259 @@
+<!doctype html>
+<html lang="en-US">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <meta name="description" content="Local Valheim dedicated server administration panel.">
+  <title>Valheim Admin</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+  <script src="{{ url_for('static', filename='app.js') }}" defer></script>
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <a class="brand" href="{{ url_for('dashboard') }}" aria-label="Valheim Admin home">
+        <span class="brand-mark" aria-hidden="true">V</span>
+        <span><strong>Valheim</strong><small>Server admin</small></span>
+      </a>
+      <nav class="nav" aria-label="Primary navigation">
+        <a class="{{ 'active' if tab == 'overview' }}" href="{{ url_for('dashboard', tab='overview') }}"><span>01</span>Overview</a>
+        <a class="{{ 'active' if tab == 'settings' }}" href="{{ url_for('dashboard', tab='settings') }}"><span>02</span>Settings</a>
+        <a class="{{ 'active' if tab == 'access' }}" href="{{ url_for('dashboard', tab='access') }}"><span>03</span>Access</a>
+        <a class="{{ 'active' if tab == 'worlds' }}" href="{{ url_for('dashboard', tab='worlds') }}"><span>04</span>Worlds</a>
+        <a class="{{ 'active' if tab == 'backups' }}" href="{{ url_for('dashboard', tab='backups') }}"><span>05</span>Backups</a>
+        <a class="{{ 'active' if tab == 'logs' }}" href="{{ url_for('dashboard', tab='logs') }}"><span>06</span>Logs</a>
+        <a class="{{ 'active' if tab == 'security' }}" href="{{ url_for('dashboard', tab='security') }}"><span>07</span>Security</a>
+      </nav>
+      <div class="sidebar-footer">
+        <div class="mini-status">
+          <span class="status-dot {{ 'online' if status.active else 'offline' }}" data-status-dot></span>
+          <span><strong data-status-text>{{ status.state }}</strong><small>{{ status.address }}:{{ status.game_port }}</small></span>
+        </div>
+        <form method="post" action="{{ url_for('logout') }}">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <button class="text-button" type="submit">Sign out</button>
+        </form>
+      </div>
+    </aside>
+
+    <main class="content">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">Valheim Dedicated Server</p>
+          <h1>{{ {'overview':'Overview','settings':'Server settings','access':'Access control','worlds':'World library','backups':'Backup vault','logs':'Service logs','security':'Panel security'}[tab] }}</h1>
+        </div>
+        <div class="topbar-status">
+          <span class="status-dot {{ 'online' if status.active else 'offline' }}" data-status-dot></span>
+          <span><small>Server status</small><strong data-status-text>{{ status.state }}</strong></span>
+        </div>
+      </header>
+
+      {% with messages = get_flashed_messages(with_categories=true) %}
+        {% for category, message in messages %}
+          <div class="alert {{ category }}" role="status">{{ message }}</div>
+        {% endfor %}
+      {% endwith %}
+
+      {% if tab == 'overview' %}
+        <section class="hero-card">
+          <div class="hero-copy">
+            <p class="eyebrow">Current world</p>
+            <h2 data-world>{{ status.world }}</h2>
+            <p>Your realm is <strong data-status-sentence>{{ 'ready for players' if status.active else 'currently resting' }}</strong>. Use the controls here for routine service operations.</p>
+            <div class="endpoint"><span>Join address</span><code data-endpoint>{{ status.address }}:{{ status.game_port }}</code><button class="copy-button" type="button" data-copy="{{ status.address }}:{{ status.game_port }}">Copy</button></div>
+          </div>
+          <div class="hero-rune" aria-hidden="true"><span>V</span></div>
+        </section>
+
+        <section class="action-row" aria-label="Server actions">
+          <form method="post" action="{{ url_for('action', action='start') }}">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <button class="button primary" type="submit">Start server</button>
+          </form>
+          <form method="post" action="{{ url_for('action', action='stop') }}" data-confirm="Stop the server? Valheim receives a clean interrupt so it can save first.">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <button class="button" type="submit">Stop</button>
+          </form>
+          <form method="post" action="{{ url_for('action', action='restart') }}">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <button class="button" type="submit">Restart</button>
+          </form>
+          <form method="post" action="{{ url_for('action', action='update') }}" data-busy="Checking Steam and updating…">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <button class="button" type="submit">Check for update</button>
+          </form>
+          <form method="post" action="{{ url_for('action', action='backup') }}" data-busy="Creating archive…">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <button class="button" type="submit">Back up now</button>
+          </form>
+        </section>
+
+        <section class="metric-grid" aria-label="Container metrics">
+          <article class="metric-card"><span>CPU load</span><strong data-cpu>{{ status.cpu }}%</strong><progress class="meter" max="100" value="{{ status.cpu }}" data-cpu-meter>CPU {{ status.cpu }}%</progress><small>Live container usage</small></article>
+          <article class="metric-card"><span>Memory</span><strong data-memory>{{ status.memory }}%</strong><progress class="meter" max="100" value="{{ status.memory }}" data-memory-meter>Memory {{ status.memory }}%</progress><small data-memory-detail>{{ status.memory_used }} of {{ status.memory_total }}</small></article>
+          <article class="metric-card"><span>Disk</span><strong data-disk>{{ status.disk }}%</strong><progress class="meter" max="100" value="{{ status.disk }}" data-disk-meter>Disk {{ status.disk }}%</progress><small data-disk-detail>{{ status.disk_free }} free</small></article>
+          <article class="metric-card build"><span>Steam build</span><strong data-build>{{ status.build }}</strong><small>App ID 896660</small></article>
+        </section>
+
+        <section class="split-grid">
+          <article class="panel-card">
+            <div class="card-heading"><div><p class="eyebrow">Runtime</p><h2>Server details</h2></div></div>
+            <dl class="detail-list">
+              <div><dt>Active since</dt><dd>{{ service_since }}</dd></div>
+              <div><dt>World</dt><dd>{{ settings.WORLD_NAME }}</dd></div>
+              <div><dt>Visibility</dt><dd>{{ 'Public listing' if settings.PUBLIC == '1' else 'Private / direct join' }}</dd></div>
+              <div><dt>Backend</dt><dd>{{ 'Crossplay (PlayFab)' if settings.CROSSPLAY == '1' else 'Steam' }}</dd></div>
+            </dl>
+          </article>
+          <article class="panel-card note-card">
+            <p class="eyebrow">Network note</p>
+            <h2>{{ 'Relay enabled' if settings.CROSSPLAY == '1' else 'Direct Steam traffic' }}</h2>
+            {% if settings.CROSSPLAY == '1' %}
+              <p>Crossplay uses the PlayFab relay. Local-IP joins are not supported in this mode; use the join code or public address.</p>
+            {% else %}
+              <p>Forward UDP {{ settings.GAME_PORT }}–{{ settings.GAME_PORT|int + 1 }} to this container for Internet players. Keep the admin panel private.</p>
+            {% endif %}
+          </article>
+        </section>
+
+      {% elif tab == 'settings' %}
+        <form method="post" action="{{ url_for('settings_save') }}" class="settings-form">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <section class="panel-card">
+            <div class="card-heading"><div><p class="eyebrow">Identity & network</p><h2>Server basics</h2></div><p>Changes take effect after a restart.</p></div>
+            <div class="form-grid">
+              <label><span>Server name</span><input name="SERVER_NAME" value="{{ settings.SERVER_NAME }}" maxlength="64" required></label>
+              <label><span>World name</span><input name="WORLD_NAME" value="{{ settings.WORLD_NAME }}" maxlength="64" required></label>
+              <label><span>Game password</span><input type="password" name="SERVER_PASSWORD" value="" minlength="5" maxlength="64" placeholder="Leave blank to keep the current password"><small>The current password is never sent back to the browser.</small></label>
+              <label><span>Base UDP port</span><input type="number" name="GAME_PORT" value="{{ settings.GAME_PORT }}" min="1024" max="65533" required><small>Valheim also uses the next port.</small></label>
+            </div>
+            <div class="toggle-grid">
+              <label class="toggle"><input type="checkbox" name="PUBLIC" value="1" {{ 'checked' if settings.PUBLIC == '1' }}><span></span><b>Public server listing<small>Show the server in the browser.</small></b></label>
+              <label class="toggle"><input type="checkbox" name="CROSSPLAY" value="1" {{ 'checked' if settings.CROSSPLAY == '1' }}><span></span><b>Crossplay backend<small>Allow Xbox and Game Pass players.</small></b></label>
+            </div>
+          </section>
+
+          <section class="panel-card">
+            <div class="card-heading"><div><p class="eyebrow">World rules</p><h2>Preset and modifiers</h2></div><p>A modifier overrides the related preset value.</p></div>
+            <div class="form-grid three">
+              <label><span>Preset</span><select name="PRESET">{% for choice in preset_choices %}<option value="{{ choice }}" {{ 'selected' if settings.PRESET == choice }}>{{ choice or 'Default' }}</option>{% endfor %}</select></label>
+              <label><span>Combat</span><select name="COMBAT">{% for choice in modifier_choices.COMBAT %}<option value="{{ choice }}" {{ 'selected' if settings.COMBAT == choice }}>{{ choice or 'Preset value' }}</option>{% endfor %}</select></label>
+              <label><span>Death penalty</span><select name="DEATH_PENALTY">{% for choice in modifier_choices.DEATH_PENALTY %}<option value="{{ choice }}" {{ 'selected' if settings.DEATH_PENALTY == choice }}>{{ choice or 'Preset value' }}</option>{% endfor %}</select></label>
+              <label><span>Resources</span><select name="RESOURCES">{% for choice in modifier_choices.RESOURCES %}<option value="{{ choice }}" {{ 'selected' if settings.RESOURCES == choice }}>{{ choice or 'Preset value' }}</option>{% endfor %}</select></label>
+              <label><span>Raids</span><select name="RAIDS">{% for choice in modifier_choices.RAIDS %}<option value="{{ choice }}" {{ 'selected' if settings.RAIDS == choice }}>{{ choice or 'Preset value' }}</option>{% endfor %}</select></label>
+              <label><span>Portals</span><select name="PORTALS">{% for choice in modifier_choices.PORTALS %}<option value="{{ choice }}" {{ 'selected' if settings.PORTALS == choice }}>{{ choice or 'Preset value' }}</option>{% endfor %}</select></label>
+            </div>
+            <div class="toggle-grid four">
+              <label class="toggle compact"><input type="checkbox" name="NO_BUILD_COST" value="1" {{ 'checked' if settings.NO_BUILD_COST == '1' }}><span></span><b>No build cost</b></label>
+              <label class="toggle compact"><input type="checkbox" name="PLAYER_EVENTS" value="1" {{ 'checked' if settings.PLAYER_EVENTS == '1' }}><span></span><b>Player events</b></label>
+              <label class="toggle compact"><input type="checkbox" name="PASSIVE_MOBS" value="1" {{ 'checked' if settings.PASSIVE_MOBS == '1' }}><span></span><b>Passive mobs</b></label>
+              <label class="toggle compact"><input type="checkbox" name="NO_MAP" value="1" {{ 'checked' if settings.NO_MAP == '1' }}><span></span><b>No map</b></label>
+            </div>
+          </section>
+
+          <section class="panel-card">
+            <div class="card-heading"><div><p class="eyebrow">Save policy</p><h2>Built-in world backups</h2></div><p>These are managed directly by Valheim.</p></div>
+            <div class="form-grid four">
+              <label><span>Save interval (seconds)</span><input type="number" name="SAVE_INTERVAL" value="{{ settings.SAVE_INTERVAL }}" min="60" max="86400" required></label>
+              <label><span>Backup copies</span><input type="number" name="BACKUPS" value="{{ settings.BACKUPS }}" min="1" max="50" required></label>
+              <label><span>Short interval</span><input type="number" name="BACKUP_SHORT" value="{{ settings.BACKUP_SHORT }}" min="300" max="604800" required></label>
+              <label><span>Long interval</span><input type="number" name="BACKUP_LONG" value="{{ settings.BACKUP_LONG }}" min="300" max="2592000" required></label>
+            </div>
+          </section>
+          <div class="sticky-actions"><span>Review your values before applying them.</span><button type="submit" class="button primary">Save settings</button></div>
+        </form>
+
+      {% elif tab == 'access' %}
+        <section class="panel-card intro-card">
+          <div><p class="eyebrow">Platform IDs</p><h2>Who may enter and administer the world</h2></div>
+          <p>Use one case-sensitive <code>[Platform]_[User ID]</code> per line. A non-empty allowlist excludes every player not listed.</p>
+        </section>
+        <div class="three-column">
+          {% for name, title, help in [('admins','Administrators','May use Valheim admin console commands.'),('bans','Banned players','Cannot connect to this world.'),('allowlist','Allowed players','When populated, only these players may join.')] %}
+            <form method="post" action="{{ url_for('access_save', name=name) }}" class="panel-card access-card">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <div class="card-heading"><div><p class="eyebrow">{{ '%02d'|format(loop.index) }}</p><h2>{{ title }}</h2></div></div>
+              <p>{{ help }}</p>
+              <textarea name="entries" rows="14" spellcheck="false">{{ access[name] }}</textarea>
+              <button class="button primary" type="submit">Save {{ title|lower }}</button>
+            </form>
+          {% endfor %}
+        </div>
+
+      {% elif tab == 'worlds' %}
+        <section class="panel-card upload-card">
+          <div><p class="eyebrow">Import</p><h2>Upload a world pair</h2><p>Select the matching <code>.db</code> and <code>.fwl</code> files. Existing files with the same name are replaced.</p></div>
+          <form method="post" action="{{ url_for('world_upload') }}" enctype="multipart/form-data" class="upload-form">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <label><span>World database (.db)</span><input type="file" name="database" accept=".db" required></label>
+            <label><span>World descriptor (.fwl)</span><input type="file" name="descriptor" accept=".fwl" required></label>
+            <button class="button primary" type="submit">Upload world</button>
+          </form>
+        </section>
+        <section class="panel-card table-card">
+          <div class="card-heading"><div><p class="eyebrow">Library</p><h2>Worlds on disk</h2></div><span class="count-badge">{{ worlds|length }} worlds</span></div>
+          {% if worlds %}
+            <div class="data-table">
+              <div class="table-row table-head"><span>World</span><span>Updated</span><span>Size</span><span>Actions</span></div>
+              {% for world in worlds %}
+                <div class="table-row">
+                  <span><strong>{{ world.name }}</strong>{% if settings.WORLD_NAME == world.name %}<small class="active-label">Active</small>{% elif not world.complete %}<small class="warning-label">Missing .fwl</small>{% endif %}</span>
+                  <span>{{ world.updated }}</span><span>{{ world.size }}</span>
+                  <span class="table-actions">
+                    {% if world.complete and settings.WORLD_NAME != world.name %}<form method="post" action="{{ url_for('world_select', name=world.name) }}"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="text-button" type="submit">Select</button></form>{% endif %}
+                    <a href="{{ url_for('world_download', name=world.name, extension='db') }}">DB</a>{% if world.complete %}<a href="{{ url_for('world_download', name=world.name, extension='fwl') }}">FWL</a>{% endif %}
+                    {% if settings.WORLD_NAME != world.name %}<form method="post" action="{{ url_for('world_delete', name=world.name) }}" data-confirm="Delete world {{ world.name }}? This cannot be undone unless you have a backup."><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="text-button danger" type="submit">Delete</button></form>{% endif %}
+                  </span>
+                </div>
+              {% endfor %}
+            </div>
+          {% else %}<div class="empty-state"><strong>No world files yet</strong><p>The active world appears after Valheim finishes its first save.</p></div>{% endif %}
+        </section>
+
+      {% elif tab == 'backups' %}
+        <section class="panel-card intro-card">
+          <div><p class="eyebrow">Archive policy</p><h2>Portable server snapshots</h2></div>
+          <div class="inline-actions"><p>Archives include worlds and all three access lists. The newest 30 are retained.</p><form method="post" action="{{ url_for('action', action='backup') }}" data-busy="Creating archive…"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="button primary" type="submit">Back up now</button></form></div>
+        </section>
+        <section class="panel-card table-card">
+          <div class="card-heading"><div><p class="eyebrow">Vault</p><h2>Available archives</h2></div><span class="count-badge">{{ backups|length }} backups</span></div>
+          {% if backups %}
+            <div class="data-table backup-table">
+              <div class="table-row table-head"><span>Archive</span><span>Created</span><span>Size</span><span>Actions</span></div>
+              {% for backup in backups %}
+                <div class="table-row"><span><strong>{{ backup.name }}</strong></span><span>{{ backup.updated }}</span><span>{{ backup.size }}</span><span class="table-actions"><a href="{{ url_for('backup_download', name=backup.name) }}">Download</a><form method="post" action="{{ url_for('backup_restore', name=backup.name) }}" data-confirm="Restore {{ backup.name }}? The game server will stop briefly if it is running."><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="text-button" type="submit">Restore</button></form><form method="post" action="{{ url_for('backup_delete', name=backup.name) }}" data-confirm="Permanently delete {{ backup.name }}?"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="text-button danger" type="submit">Delete</button></form></span></div>
+              {% endfor %}
+            </div>
+          {% else %}<div class="empty-state"><strong>No archives yet</strong><p>Create the first portable snapshot now.</p></div>{% endif %}
+        </section>
+
+      {% elif tab == 'logs' %}
+        <section class="panel-card log-card">
+          <div class="card-heading"><div><p class="eyebrow">Last 250 journal entries</p><h2>Valheim service log</h2></div><a class="button" href="{{ url_for('dashboard', tab='logs') }}">Refresh</a></div>
+          <pre>{{ logs }}</pre>
+        </section>
+
+      {% elif tab == 'security' %}
+        <section class="security-grid">
+          <form method="post" action="{{ url_for('security_password') }}" class="panel-card form-stack">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <div><p class="eyebrow">Credentials</p><h2>Change panel password</h2><p>Use at least 12 characters. Your new password is stored as a salted PBKDF2 hash.</p></div>
+            <label><span>Current password</span><input type="password" name="current_password" autocomplete="current-password" required></label>
+            <label><span>New password</span><input type="password" name="new_password" autocomplete="new-password" minlength="12" required></label>
+            <label><span>Confirm new password</span><input type="password" name="confirm_password" autocomplete="new-password" minlength="12" required></label>
+            <button class="button primary" type="submit">Change password</button>
+          </form>
+          <article class="panel-card security-note">
+            <p class="eyebrow">Deployment boundary</p><h2>Keep this control plane private</h2>
+            <p>The panel can restart the game, replace worlds, and restore archives. It is intended for your trusted network.</p>
+            <ul><li>Prefer a VPN for remote administration.</li><li>Do not port-forward TCP {{ panel_port }}.</li><li>Keep Debian and Valheim updates enabled.</li></ul>
+          </article>
+        </section>
+      {% endif %}
+
+      <footer class="page-footer">Valheim Admin · English (United States) · UTF-8 · {{ current_year }}</footer>
+    </main>
+  </div>
+</body>
+</html>

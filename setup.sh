@@ -1,0 +1,554 @@
+#!/usr/bin/env bash
+# Installs SteamCMD, Valheim Dedicated Server, and the local admin panel.
+# Run as root inside a fresh Debian 13 system, or let install.sh invoke it.
+set -Eeuo pipefail
+
+VALHEIM_HOME=${VALHEIM_HOME:-/opt/valheim}
+SOURCE_DIR=${SOURCE_DIR:-$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)}
+REPO_RAW=${REPO_RAW:-}
+APP_ID=896660
+SERVER_NAME=${SERVER_NAME:-Valheim Dedicated Server}
+WORLD_NAME=${WORLD_NAME:-Dedicated}
+GAME_PASSWORD=${GAME_PASSWORD:-Valheim123}
+GAME_PORT=${GAME_PORT:-2456}
+PANEL_USERNAME=${PANEL_USERNAME:-admin}
+PANEL_PASSWORD=${PANEL_PASSWORD:-}
+PANEL_PORT=${PANEL_PORT:-2460}
+
+green='\033[1;32m'
+red='\033[1;31m'
+reset='\033[0m'
+step=0
+total_steps=8
+
+say() { step=$((step + 1)); printf "%b[%s/%s]%b %s\n" "$green" "$step" "$total_steps" "$reset" "$*"; }
+die() { printf "%bError:%b %s\n" "$red" "$reset" "$*" >&2; exit 1; }
+trap 'printf "\033[1;31mSetup failed at line %s.\033[0m\n" "$LINENO" >&2' ERR
+
+[[ $(id -u) -eq 0 ]] || die "Run setup.sh as root."
+[[ -r /etc/os-release ]] || die "Cannot identify the operating system."
+# shellcheck disable=SC1091
+. /etc/os-release
+if [[ ${ID:-} != debian || ${VERSION_ID:-} != 13* ]]; then
+  [[ ${ALLOW_UNSUPPORTED_OS:-0} == 1 ]] || die "Debian 13 is required (detected: ${PRETTY_NAME:-unknown})."
+fi
+[[ $(dpkg --print-architecture) == amd64 ]] || die "Valheim Dedicated Server requires an amd64 container."
+if [[ ! $GAME_PORT =~ ^[0-9]+$ ]] || ((GAME_PORT < 1024 || GAME_PORT > 65533)); then die "GAME_PORT is invalid."; fi
+if [[ ! $PANEL_PORT =~ ^[0-9]+$ ]] || ((PANEL_PORT < 1024 || PANEL_PORT > 65535)); then die "PANEL_PORT is invalid."; fi
+(( ${#GAME_PASSWORD} >= 5 )) || die "The Valheim game password must contain at least five characters."
+(( ${#GAME_PASSWORD} <= 64 )) || die "The Valheim game password must not exceed 64 characters."
+[[ $GAME_PASSWORD != *$'\n'* && $GAME_PASSWORD != *$'\r'* ]] || die "The Valheim game password contains a line break."
+[[ -n $SERVER_NAME && ${#SERVER_NAME} -le 64 && $SERVER_NAME != *$'\n'* && $SERVER_NAME != *$'\r'* ]] || die "SERVER_NAME is invalid."
+[[ $WORLD_NAME =~ ^[A-Za-z0-9][A-Za-z0-9._\ -]{0,63}$ ]] || die "WORLD_NAME is invalid."
+
+if [[ -z $PANEL_PASSWORD ]]; then
+  random_source=$(head -c 256 /dev/urandom | base64 | tr -dc 'A-Za-z0-9!@#%+=' || true)
+  PANEL_PASSWORD=${random_source:0:18}
+fi
+(( ${#PANEL_PASSWORD} >= 12 )) || die "The panel password must contain at least 12 characters."
+
+say "Configuring the en_US.UTF-8 system locale"
+export DEBIAN_FRONTEND=noninteractive
+export LANG=C.UTF-8
+export LC_ALL=C.UTF-8
+apt-get update -qq
+apt-get install -y -qq --no-install-recommends locales ca-certificates curl >/dev/null
+if grep -Eq '^# *en_US.UTF-8 UTF-8' /etc/locale.gen; then
+  sed -i -E 's/^# *(en_US.UTF-8 UTF-8)/\1/' /etc/locale.gen
+elif ! grep -Eq '^en_US.UTF-8 UTF-8' /etc/locale.gen; then
+  printf 'en_US.UTF-8 UTF-8\n' >>/etc/locale.gen
+fi
+locale-gen en_US.UTF-8 >/dev/null
+update-locale LANG=en_US.UTF-8 LANGUAGE=en_US:en
+
+say "Installing Steam and Valheim runtime dependencies"
+dpkg --add-architecture i386
+apt-get update -qq
+apt-get install -y -qq --no-install-recommends \
+  bash coreutils findutils grep gawk sed procps util-linux \
+  tar gzip unzip jq sudo \
+  lib32gcc-s1 lib32stdc++6 libc6-i386 \
+  libatomic1 libpulse0 libpulse-dev libpulse-mainloop-glib0 \
+  python3 python3-flask python3-waitress python3-psutil >/dev/null
+
+say "Creating dedicated service accounts and directories"
+getent group valheim-admin >/dev/null 2>&1 || groupadd --system valheim-admin
+if ! id -u valheim >/dev/null 2>&1; then
+  useradd --system --create-home --home-dir "$VALHEIM_HOME" --shell /usr/sbin/nologin valheim
+fi
+if ! id -u valheim-panel >/dev/null 2>&1; then
+  useradd --system --home-dir "$VALHEIM_HOME/panel" --shell /usr/sbin/nologin valheim-panel
+fi
+usermod -a -G valheim-admin valheim
+usermod -a -G valheim-admin valheim-panel
+install -d -o valheim -g valheim-admin -m 2770 \
+  "$VALHEIM_HOME" \
+  "$VALHEIM_HOME/steamcmd" \
+  "$VALHEIM_HOME/server" \
+  "$VALHEIM_HOME/data" \
+  "$VALHEIM_HOME/data/worlds_local" \
+  "$VALHEIM_HOME/backups" \
+  "$VALHEIM_HOME/logs" \
+  "$VALHEIM_HOME/bin"
+install -d -o valheim-panel -g valheim-admin -m 0750 \
+  "$VALHEIM_HOME/panel" \
+  "$VALHEIM_HOME/panel/templates" \
+  "$VALHEIM_HOME/panel/static"
+install -d -o root -g valheim-admin -m 2770 /etc/valheim
+
+say "Installing SteamCMD from Valve"
+if [[ ! -x $VALHEIM_HOME/steamcmd/steamcmd.sh ]]; then
+  steam_archive=$(mktemp)
+  curl -fsSL https://steamcdn-a.akamaihd.net/client/installer/steamcmd_linux.tar.gz -o "$steam_archive"
+  runuser -u valheim -- tar -xzf "$steam_archive" -C "$VALHEIM_HOME/steamcmd"
+  rm -f "$steam_archive"
+fi
+chown -R valheim:valheim-admin "$VALHEIM_HOME/steamcmd"
+
+say "Installing Valheim Dedicated Server with anonymous Steam login"
+# The first SteamCMD invocation may update and re-exec itself. Warm it up before app_update.
+runuser -u valheim -- env HOME="$VALHEIM_HOME" LANG=en_US.UTF-8 \
+  "$VALHEIM_HOME/steamcmd/steamcmd.sh" +login anonymous +quit \
+  >"$VALHEIM_HOME/logs/steamcmd-install.log" 2>&1 || true
+runuser -u valheim -- env HOME="$VALHEIM_HOME" LANG=en_US.UTF-8 \
+  "$VALHEIM_HOME/steamcmd/steamcmd.sh" \
+  +force_install_dir "$VALHEIM_HOME/server" \
+  +login anonymous \
+  +app_update "$APP_ID" validate \
+  +quit 2>&1 | tee -a "$VALHEIM_HOME/logs/steamcmd-install.log"
+[[ -x $VALHEIM_HOME/server/valheim_server.x86_64 ]] || die "SteamCMD did not install the Valheim server successfully. See $VALHEIM_HOME/logs/steamcmd-install.log."
+
+say "Writing the server configuration and maintenance tools"
+SERVER_CONFIG_CREATED=0
+if [[ ! -f /etc/valheim/server.env ]]; then
+  SERVER_CONFIG_CREATED=1
+  env_quote() {
+    local value=$1
+    value=${value//\\/\\\\}
+    value=${value//\"/\\\"}
+    printf '"%s"' "$value"
+  }
+  {
+    printf 'SERVER_NAME=%s\n' "$(env_quote "$SERVER_NAME")"
+    printf 'WORLD_NAME=%s\n' "$(env_quote "$WORLD_NAME")"
+    printf 'SERVER_PASSWORD=%s\n' "$(env_quote "$GAME_PASSWORD")"
+    printf 'GAME_PORT="%s"\n' "$GAME_PORT"
+    cat <<'EOF'
+PUBLIC="0"
+CROSSPLAY="0"
+SAVE_INTERVAL="1800"
+BACKUPS="4"
+BACKUP_SHORT="7200"
+BACKUP_LONG="43200"
+PRESET=""
+COMBAT=""
+DEATH_PENALTY=""
+RESOURCES=""
+RAIDS=""
+PORTALS=""
+NO_BUILD_COST="0"
+PLAYER_EVENTS="0"
+PASSIVE_MOBS="0"
+NO_MAP="0"
+EOF
+  } >/etc/valheim/server.env
+fi
+chown root:valheim-admin /etc/valheim/server.env
+chmod 0660 /etc/valheim/server.env
+
+for access_file in adminlist bannedlist permittedlist; do
+  if [[ ! -f $VALHEIM_HOME/data/$access_file.txt ]]; then
+    printf '// One platform user ID per line.\n' >"$VALHEIM_HOME/data/$access_file.txt"
+  fi
+done
+chown -R valheim:valheim-admin "$VALHEIM_HOME/data" "$VALHEIM_HOME/backups" "$VALHEIM_HOME/logs"
+chmod 2770 "$VALHEIM_HOME/data" "$VALHEIM_HOME/data/worlds_local" "$VALHEIM_HOME/backups" "$VALHEIM_HOME/logs"
+find "$VALHEIM_HOME/data" -type f -exec chmod 0660 {} +
+
+cat >"$VALHEIM_HOME/bin/start-server" <<'EOF'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+: "${SERVER_NAME:=Valheim Dedicated Server}"
+: "${WORLD_NAME:=Dedicated}"
+: "${SERVER_PASSWORD:=Valheim123}"
+: "${GAME_PORT:=2456}"
+: "${PUBLIC:=0}"
+: "${CROSSPLAY:=0}"
+: "${SAVE_INTERVAL:=1800}"
+: "${BACKUPS:=4}"
+: "${BACKUP_SHORT:=7200}"
+: "${BACKUP_LONG:=43200}"
+
+cd /opt/valheim/server
+export HOME=/opt/valheim
+export SteamAppId=892970
+export LD_LIBRARY_PATH="/opt/valheim/server/linux64:${LD_LIBRARY_PATH:-}"
+
+args=(
+  -nographics
+  -batchmode
+  -name "$SERVER_NAME"
+  -port "$GAME_PORT"
+  -world "$WORLD_NAME"
+  -password "$SERVER_PASSWORD"
+  -savedir /opt/valheim/data
+  -public "$PUBLIC"
+  -saveinterval "$SAVE_INTERVAL"
+  -backups "$BACKUPS"
+  -backupshort "$BACKUP_SHORT"
+  -backuplong "$BACKUP_LONG"
+  -logFile /opt/valheim/logs/valheim.log
+)
+[[ ${CROSSPLAY:-0} == 1 ]] && args+=(-crossplay)
+[[ -z ${PRESET:-} ]] || args+=(-preset "$PRESET")
+[[ -z ${COMBAT:-} ]] || args+=(-modifier Combat "$COMBAT")
+[[ -z ${DEATH_PENALTY:-} ]] || args+=(-modifier DeathPenalty "$DEATH_PENALTY")
+[[ -z ${RESOURCES:-} ]] || args+=(-modifier Resources "$RESOURCES")
+[[ -z ${RAIDS:-} ]] || args+=(-modifier Raids "$RAIDS")
+[[ -z ${PORTALS:-} ]] || args+=(-modifier Portals "$PORTALS")
+[[ ${NO_BUILD_COST:-0} == 1 ]] && args+=(-setkey nobuildcost)
+[[ ${PLAYER_EVENTS:-0} == 1 ]] && args+=(-setkey playerevents)
+[[ ${PASSIVE_MOBS:-0} == 1 ]] && args+=(-setkey passivemobs)
+[[ ${NO_MAP:-0} == 1 ]] && args+=(-setkey nomap)
+
+printf 'Starting Valheim: name=%q world=%q port=%q public=%q crossplay=%q\n' \
+  "$SERVER_NAME" "$WORLD_NAME" "$GAME_PORT" "$PUBLIC" "$CROSSPLAY"
+exec ./valheim_server.x86_64 "${args[@]}"
+EOF
+
+cat >"$VALHEIM_HOME/bin/backup-server" <<'EOF'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+source_dir=/opt/valheim/data
+backup_dir=/opt/valheim/backups
+timestamp=$(date -u +%Y%m%dT%H%M%SZ)
+target="$backup_dir/valheim-$timestamp.tar.gz"
+temporary="$target.partial"
+install -d -o valheim -g valheim-admin -m 2770 "$backup_dir"
+tar -czf "$temporary" -C "$source_dir" worlds_local adminlist.txt bannedlist.txt permittedlist.txt
+mv "$temporary" "$target"
+chown valheim:valheim-admin "$target"
+chmod 0660 "$target"
+find "$backup_dir" -maxdepth 1 -type f -name 'valheim-*.tar.gz' -printf '%T@ %p\n' \
+  | sort -nr | awk 'NR > 30 {sub(/^[^ ]+ /, ""); print}' | xargs -r rm -f --
+printf 'Created %s\n' "$target"
+EOF
+
+cat >"$VALHEIM_HOME/bin/update-server" <<'EOF'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+app_id=896660
+home=/opt/valheim
+manifest="$home/server/steamapps/appmanifest_$app_id.acf"
+installed=$(grep -m1 -oE '"buildid"[[:space:]]+"[0-9]+"' "$manifest" 2>/dev/null \
+  | grep -oE '[0-9]+' || true)
+
+# Read the public branch metadata without changing the installed server files.
+# SteamCMD emits Valve Data Format; the state transitions below select only the
+# public branch and return its first numeric build ID.
+metadata_file=$(mktemp)
+trap 'rm -f "$metadata_file"' EXIT
+runuser -u valheim -- env HOME="$home" LANG=en_US.UTF-8 \
+  "$home/steamcmd/steamcmd.sh" \
+  +login anonymous +app_info_update 1 +app_info_print "$app_id" +quit \
+  >"$metadata_file" 2>/dev/null
+latest=$(awk '
+  /^[[:space:]]*"branches"[[:space:]]*$/ { branches_pending = 1; next }
+  branches_pending && /^[[:space:]]*\{/ { in_branches = 1; branches_pending = 0; next }
+  in_branches && /^[[:space:]]*"public"[[:space:]]*$/ { public_pending = 1; next }
+  public_pending && /^[[:space:]]*\{/ { in_public = 1; public_pending = 0; next }
+  in_public && /"buildid"[[:space:]]*"[0-9]+"/ {
+    line = $0
+    sub(/^.*"buildid"[[:space:]]*"/, "", line)
+    sub(/".*$/, "", line)
+    print line
+    exit
+  }
+' "$metadata_file")
+if [[ -n $installed && -n $latest && $installed == "$latest" ]]; then
+  printf 'Valheim is up to date (build %s).\n' "$installed"
+  exit 0
+fi
+[[ -n $latest ]] || { echo 'Could not determine the current Steam build.' >&2; exit 1; }
+was_active=0
+systemctl is-active --quiet valheim.service && was_active=1
+((was_active == 0)) || systemctl stop valheim.service
+if ! runuser -u valheim -- env HOME="$home" LANG=en_US.UTF-8 \
+  "$home/steamcmd/steamcmd.sh" +force_install_dir "$home/server" \
+  +login anonymous +app_update "$app_id" validate +quit \
+  >"$home/logs/steamcmd-update.log" 2>&1; then
+  ((was_active == 0)) || systemctl start valheim.service
+  echo "Steam update failed. See $home/logs/steamcmd-update.log." >&2
+  exit 1
+fi
+((was_active == 0)) || systemctl start valheim.service
+printf 'Updated Valheim from build %s to build %s.\n' "${installed:-unknown}" "$latest"
+EOF
+
+cat >/usr/local/sbin/valheimctl <<'EOF'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+action=${1:-}
+argument=${2:-}
+backup_dir=/opt/valheim/backups
+data_dir=/opt/valheim/data
+
+case "$action" in
+  start|stop|restart)
+    [[ $# -eq 1 ]] || { echo "Unexpected argument." >&2; exit 2; }
+    systemctl "$action" valheim.service
+    ;;
+  update)
+    [[ $# -eq 1 ]] || { echo "Unexpected argument." >&2; exit 2; }
+    /opt/valheim/bin/update-server
+    ;;
+  backup)
+    [[ $# -eq 1 ]] || { echo "Unexpected argument." >&2; exit 2; }
+    /opt/valheim/bin/backup-server
+    ;;
+  restore)
+    [[ $# -eq 2 && $argument =~ ^valheim-[0-9]{8}T[0-9]{6}Z\.tar\.gz$ ]] || { echo "Invalid backup name." >&2; exit 2; }
+    archive="$backup_dir/$argument"
+    [[ -f $archive ]] || { echo "Backup does not exist." >&2; exit 2; }
+    if tar -tzf "$archive" | grep -Eq '(^/|(^|/)\.\.(/|$))'; then
+      echo "Unsafe backup archive." >&2
+      exit 2
+    fi
+    was_active=0
+    systemctl is-active --quiet valheim.service && was_active=1
+    ((was_active == 0)) || systemctl stop valheim.service
+    tar -xzf "$archive" -C "$data_dir"
+    chown -R valheim:valheim-admin "$data_dir"
+    ((was_active == 0)) || systemctl start valheim.service
+    printf 'Restored %s\n' "$argument"
+    ;;
+  logs)
+    [[ $# -eq 1 ]] || { echo "Unexpected argument." >&2; exit 2; }
+    journalctl -u valheim.service --no-pager -n 250
+    ;;
+  *)
+    echo "Usage: valheimctl {start|stop|restart|update|backup|restore NAME|logs}" >&2
+    exit 2
+    ;;
+esac
+EOF
+
+chmod 0750 "$VALHEIM_HOME/bin/start-server" "$VALHEIM_HOME/bin/backup-server" "$VALHEIM_HOME/bin/update-server"
+chown root:valheim-admin "$VALHEIM_HOME/bin/start-server" "$VALHEIM_HOME/bin/backup-server" "$VALHEIM_HOME/bin/update-server"
+chmod 0755 /usr/local/sbin/valheimctl
+chown root:root /usr/local/sbin/valheimctl
+
+cat >/etc/sudoers.d/valheim-panel <<'EOF'
+valheim-panel ALL=(root) NOPASSWD: /usr/local/sbin/valheimctl *
+EOF
+chmod 0440 /etc/sudoers.d/valheim-panel
+visudo -cf /etc/sudoers.d/valheim-panel >/dev/null
+
+say "Installing the English admin panel"
+copy_asset() {
+  local relative=$1 destination=$2
+  if [[ -f $SOURCE_DIR/$relative ]]; then
+    install -o valheim-panel -g valheim-admin -m 0640 "$SOURCE_DIR/$relative" "$destination"
+  elif [[ -n $REPO_RAW ]]; then
+    curl -fsSL "$REPO_RAW/$relative" -o "$destination"
+    chown valheim-panel:valheim-admin "$destination"
+    chmod 0640 "$destination"
+  else
+    die "Missing panel asset: $relative"
+  fi
+}
+copy_asset panel/app.py "$VALHEIM_HOME/panel/app.py"
+copy_asset panel/templates/login.html "$VALHEIM_HOME/panel/templates/login.html"
+copy_asset panel/templates/dashboard.html "$VALHEIM_HOME/panel/templates/dashboard.html"
+copy_asset panel/static/style.css "$VALHEIM_HOME/panel/static/style.css"
+copy_asset panel/static/app.js "$VALHEIM_HOME/panel/static/app.js"
+
+PANEL_CONFIG_CREATED=0
+if [[ ! -f /etc/valheim/panel.json ]]; then
+  PANEL_CONFIG_CREATED=1
+  PANEL_USERNAME="$PANEL_USERNAME" PANEL_PASSWORD="$PANEL_PASSWORD" python3 - <<'PY'
+import hashlib
+import json
+import os
+import secrets
+from pathlib import Path
+
+salt = secrets.token_bytes(16)
+iterations = 390000
+password = os.environ["PANEL_PASSWORD"].encode("utf-8")
+digest = hashlib.pbkdf2_hmac("sha256", password, salt, iterations)
+config = {
+    "username": os.environ["PANEL_USERNAME"],
+    "password_hash": f"pbkdf2_sha256${iterations}${salt.hex()}${digest.hex()}",
+    "session_secret": secrets.token_urlsafe(48),
+}
+Path("/etc/valheim/panel.json").write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
+PY
+fi
+chown valheim-panel:valheim-admin /etc/valheim/panel.json
+chmod 0600 /etc/valheim/panel.json
+
+cat >/usr/local/sbin/valheim-panel-password <<'EOF'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+[[ $# -eq 2 ]] || { echo "Usage: valheim-panel-password USERNAME NEW_PASSWORD" >&2; exit 2; }
+(( ${#2} >= 12 )) || { echo "Password must contain at least 12 characters." >&2; exit 2; }
+runuser -u valheim-panel -- env \
+  VALHEIM_PANEL_CONFIG=/etc/valheim/panel.json \
+  python3 /opt/valheim/panel/app.py --set-password "$1" "$2"
+systemctl restart valheim-panel.service
+EOF
+chmod 0750 /usr/local/sbin/valheim-panel-password
+
+say "Creating and enabling system services"
+cat >/etc/systemd/system/valheim.service <<'EOF'
+[Unit]
+Description=Valheim Dedicated Server
+Documentation=https://valheim.com/support/a-guide-to-dedicated-servers/
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=valheim
+Group=valheim-admin
+Environment=HOME=/opt/valheim
+Environment=LANG=en_US.UTF-8
+EnvironmentFile=/etc/valheim/server.env
+WorkingDirectory=/opt/valheim/server
+ExecStart=/opt/valheim/bin/start-server
+Restart=on-failure
+RestartSec=10
+KillSignal=SIGINT
+TimeoutStopSec=120
+LimitNOFILE=100000
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=/opt/valheim
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+cat >/etc/systemd/system/valheim-panel.service <<EOF
+[Unit]
+Description=Valheim Admin Panel
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=valheim-panel
+Group=valheim-admin
+SupplementaryGroups=valheim-admin
+Environment=LANG=en_US.UTF-8
+Environment=VALHEIM_PANEL_PORT=$PANEL_PORT
+Environment=VALHEIM_PANEL_CONFIG=/etc/valheim/panel.json
+WorkingDirectory=/opt/valheim/panel
+ExecStart=/usr/bin/python3 -m waitress --host=0.0.0.0 --port=$PANEL_PORT app:app
+Restart=always
+RestartSec=5
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+ReadWritePaths=/etc/valheim /opt/valheim/data /opt/valheim/backups
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+cat >/etc/systemd/system/valheim-backup.service <<'EOF'
+[Unit]
+Description=Create a Valheim world archive
+After=local-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/valheim/bin/backup-server
+EOF
+
+cat >/etc/systemd/system/valheim-backup.timer <<'EOF'
+[Unit]
+Description=Create a Valheim world archive every two hours
+
+[Timer]
+OnBootSec=15min
+OnUnitActiveSec=2h
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+
+cat >/etc/systemd/system/valheim-update.service <<'EOF'
+[Unit]
+Description=Install a new Valheim server build when available
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/valheim/bin/update-server
+EOF
+
+cat >/etc/systemd/system/valheim-update.timer <<'EOF'
+[Unit]
+Description=Check for a Valheim server update every day
+
+[Timer]
+OnCalendar=*-*-* 05:00:00
+RandomizedDelaySec=30m
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+
+systemctl daemon-reload
+systemctl enable valheim.service valheim-panel.service valheim-backup.timer valheim-update.timer >/dev/null
+systemctl restart valheim-panel.service
+systemctl restart valheim.service
+systemctl start valheim-backup.timer valheim-update.timer
+
+say "Verifying the installation"
+panel_ready=0
+for _ in $(seq 1 30); do
+  if systemctl is-active --quiet valheim-panel.service \
+    && curl -fsS "http://127.0.0.1:$PANEL_PORT/login" >/dev/null; then
+    panel_ready=1
+    break
+  fi
+  sleep 1
+done
+((panel_ready == 1)) || die "The admin panel did not pass its HTTP health check. Run: journalctl -u valheim-panel"
+systemctl is-active --quiet valheim.service || die "The Valheim server did not start. Run: journalctl -u valheim"
+
+host_ip=$(hostname -I | awk '{print $1}')
+if ((PANEL_CONFIG_CREATED == 1)); then
+  panel_login_display=$PANEL_USERNAME
+  panel_password_display=$PANEL_PASSWORD
+else
+  panel_login_display='<unchanged>'
+  panel_password_display='<unchanged; reset with valheim-panel-password>'
+fi
+if ((SERVER_CONFIG_CREATED == 1)); then
+  game_password_display=$GAME_PASSWORD
+else
+  game_password_display='<unchanged; manage it in the panel>'
+fi
+cat <<EOF
+
+Valheim is installed.
+
+  Locale:          en_US.UTF-8
+  Admin panel:     http://$host_ip:$PANEL_PORT
+  Panel username:  $panel_login_display
+  Panel password:  $panel_password_display
+  Game endpoint:   $host_ip:$GAME_PORT
+  Game password:   $game_password_display
+
+Reset the panel login from the LXC console with:
+  valheim-panel-password USERNAME NEW_PASSWORD
+
+EOF

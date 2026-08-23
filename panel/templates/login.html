@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en-US">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <meta name="description" content="Secure local administration for a Valheim dedicated server.">
+  <title>Sign in · Valheim Admin</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body class="login-body">
+  <main class="login-shell">
+    <section class="login-story" aria-labelledby="welcome-title">
+      <div class="brand-mark large" aria-hidden="true">V</div>
+      <p class="eyebrow">Dedicated server control</p>
+      <h1 id="welcome-title">Keep the realm steady.</h1>
+      <p class="login-intro">A focused control room for your Valheim world, running privately inside your Debian container.</p>
+      <div class="login-facts" aria-label="Panel features">
+        <span>Service control</span>
+        <span>World archives</span>
+        <span>Access lists</span>
+      </div>
+    </section>
+
+    <section class="login-card" aria-labelledby="login-title">
+      <div>
+        <p class="eyebrow">Valheim Admin</p>
+        <h2 id="login-title">Welcome back</h2>
+        <p>Sign in with the credentials created during installation.</p>
+      </div>
+      {% if error %}
+        <div class="alert error" role="alert">{{ error }}</div>
+      {% endif %}
+      <form method="post" action="{{ url_for('login') }}" class="form-stack">
+        <label>
+          <span>Username</span>
+          <input name="username" autocomplete="username" required autofocus>
+        </label>
+        <label>
+          <span>Password</span>
+          <input type="password" name="password" autocomplete="current-password" required>
+        </label>
+        <button type="submit" class="button primary full">Sign in</button>
+      </form>
+      <p class="fine-print">For your safety, expose this panel only to a trusted LAN or VPN.</p>
+    </section>
+  </main>
+</body>
+</html>

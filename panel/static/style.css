@@ -160,6 +160,11 @@ input[type="file"]::file-selector-button { margin-right: 10px; padding: 5px 9px;
 .three-column { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
 .access-card { display: flex; flex-direction: column; }
 .access-card textarea { flex: 1; min-height: 250px; margin: 5px 0 16px; }
+.world-tool-grid { display: grid; grid-template-columns: minmax(300px, .75fr) minmax(560px, 1.25fr); gap: 14px; }
+.world-tool-grid > .panel-card { min-width: 0; align-content: start; }
+.world-create-card { border-color: #51452c; }
+.world-create-card .button { justify-self: start; }
+.world-import-card .upload-form { min-width: 0; }
 .upload-form { display: grid; grid-template-columns: minmax(160px, 1fr) minmax(160px, 1fr) auto; align-items: end; gap: 10px; min-width: min(100%, 620px); }
 
 .count-badge, .active-label, .warning-label { display: inline-flex; align-items: center; width: max-content; padding: 3px 7px; border-radius: 99px; font-size: .64rem; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }
@@ -238,6 +243,7 @@ input[type="file"]::file-selector-button { margin-right: 10px; padding: 5px 9px;
   .upload-form { width: 100%; }
   .form-grid.four, .toggle-grid.four { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .maintenance-card { grid-template-columns: 1fr; gap: 20px; }
+  .world-tool-grid { grid-template-columns: 1fr; }
 }
 
 @media (max-width: 820px) {
@@ -279,6 +285,12 @@ input[type="file"]::file-selector-button { margin-right: 10px; padding: 5px 9px;
   .card-heading > p { margin-top: 8px; text-align: left; }
   .inline-actions { align-items: flex-start; flex-direction: column; }
   .upload-form { grid-template-columns: 1fr; }
+  .world-table { min-width: 0; overflow: visible; }
+  .world-table .table-head { display: none; }
+  .world-table .table-row { grid-template-columns: 1fr; min-height: 0; padding: 14px; }
+  .world-table .table-row > span { padding: 6px 0; }
+  .world-table .table-row > span[data-label]::before { content: attr(data-label); display: block; margin-bottom: 3px; color: #7e8982; font-size: .61rem; letter-spacing: .1em; text-transform: uppercase; }
+  .world-table .table-actions { margin-top: 5px; padding-top: 12px; border-top: 1px solid var(--line-soft); }
   .sticky-actions { align-items: stretch; flex-direction: column; }
   .sticky-actions .button { width: 100%; }
   .login-server-grid { grid-template-columns: 1fr; }

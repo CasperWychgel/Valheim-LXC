@@ -175,6 +175,15 @@ in-game F5 console. Character levels and active Forsaken powers are not exposed
 in the dedicated-server connection log and therefore are intentionally not
 invented by the panel.
 
+The authenticated **Worlds** page separates world creation from world import.
+Creating a world assigns a unique name and lets Valheim generate a new random
+seed. To use a specific seed, create the world in a Valheim client first and
+upload its matching `.db` and `.fwl` files. Existing files are never
+overwritten. Activating another world is blocked while players are online,
+creates a portable snapshot, updates the active world, and restarts the game.
+If that restart fails, the previous world configuration is restored and its
+service restart is attempted automatically. The active world cannot be deleted.
+
 The panel is a control plane: it can replace world files and stop the game.
 Keep it on a trusted LAN or access it through a VPN. Do not forward its TCP port
 directly from the Internet.

@@ -176,7 +176,8 @@
             <div class="card-heading"><div><p class="eyebrow">Identity & network</p><h2>Server basics</h2></div><p>Changes take effect after a restart.</p></div>
             <div class="form-grid">
               <label><span>Server name</span><input name="SERVER_NAME" value="{{ settings.SERVER_NAME }}" maxlength="64" required></label>
-              <label><span>World name</span><input name="WORLD_NAME" value="{{ settings.WORLD_NAME }}" maxlength="64" required></label>
+              <label><span>Active world</span><input value="{{ settings.WORLD_NAME }}" disabled><small>Create, import, and switch worlds safely on the <a href="{{ url_for('dashboard', tab='worlds') }}">Worlds page</a>.</small></label>
+              <input type="hidden" name="WORLD_NAME" value="{{ settings.WORLD_NAME }}">
               <label><span>Game password</span><input type="password" name="SERVER_PASSWORD" value="" minlength="5" maxlength="64" placeholder="Leave blank to keep the current password"><small>The current password is never sent back to the browser.</small></label>
               <label><span>Base UDP port</span><input type="number" name="GAME_PORT" value="{{ settings.GAME_PORT }}" min="1024" max="65533" required><small>Valheim also uses the next port.</small></label>
             </div>
@@ -234,27 +235,37 @@
         </div>
 
       {% elif tab == 'worlds' %}
-        <section class="panel-card upload-card">
-          <div><p class="eyebrow">Import</p><h2>Upload a world pair</h2><p>Select the matching <code>.db</code> and <code>.fwl</code> files. Existing files with the same name are replaced.</p></div>
-          <form method="post" action="{{ url_for('world_upload') }}" enctype="multipart/form-data" class="upload-form">
+        <section class="world-tool-grid">
+          <form method="post" action="{{ url_for('world_create') }}" class="panel-card form-stack world-create-card" data-confirm="Create and activate this world? The current world will be backed up and the server will restart.">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-            <label><span>World database (.db)</span><input type="file" name="database" accept=".db" required></label>
-            <label><span>World descriptor (.fwl)</span><input type="file" name="descriptor" accept=".fwl" required></label>
-            <button class="button primary" type="submit">Upload world</button>
+            <div><p class="eyebrow">Random seed</p><h2>Create a new world</h2><p>Choose a unique name. Valheim generates a fresh random seed after the automatic backup and restart.</p></div>
+            <label><span>New world name</span><input name="world_name" maxlength="64" placeholder="Example: Dedicated-2" required><small>Letters, numbers, spaces, dots, underscores, and hyphens are supported.</small></label>
+            <button class="button primary" type="submit">Create and activate</button>
           </form>
+
+          <section class="panel-card form-stack world-import-card">
+            <div><p class="eyebrow">Custom seed</p><h2>Import an existing world</h2><p>Create the desired seed in the Valheim client, then upload its matching <code>.db</code> and <code>.fwl</code> files. Existing worlds are never overwritten.</p></div>
+            <form method="post" action="{{ url_for('world_upload') }}" enctype="multipart/form-data" class="upload-form">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <label><span>World database (.db)</span><input type="file" name="database" accept=".db" required></label>
+              <label><span>World descriptor (.fwl)</span><input type="file" name="descriptor" accept=".fwl" required></label>
+              <button class="button" type="submit">Upload world</button>
+            </form>
+          </section>
         </section>
         <section class="panel-card table-card">
-          <div class="card-heading"><div><p class="eyebrow">Library</p><h2>Worlds on disk</h2></div><span class="count-badge">{{ worlds|length }} worlds</span></div>
+          <div class="card-heading"><div><p class="eyebrow">World library</p><h2>Available worlds</h2><p>World switches create a snapshot, require an empty server, and restart Valheim automatically.</p></div><span class="count-badge">{{ worlds|length }} worlds</span></div>
           {% if worlds %}
-            <div class="data-table">
+            <div class="data-table world-table">
               <div class="table-row table-head"><span>World</span><span>Updated</span><span>Size</span><span>Actions</span></div>
               {% for world in worlds %}
                 <div class="table-row">
                   <span><strong>{{ world.name }}</strong>{% if settings.WORLD_NAME == world.name %}<small class="active-label">Active</small>{% elif not world.complete %}<small class="warning-label">Missing .fwl</small>{% endif %}</span>
-                  <span>{{ world.updated }}</span><span>{{ world.size }}</span>
-                  <span class="table-actions">
-                    {% if world.complete and settings.WORLD_NAME != world.name %}<form method="post" action="{{ url_for('world_select', name=world.name) }}"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="text-button" type="submit">Select</button></form>{% endif %}
-                    <a href="{{ url_for('world_download', name=world.name, extension='db') }}">DB</a>{% if world.complete %}<a href="{{ url_for('world_download', name=world.name, extension='fwl') }}">FWL</a>{% endif %}
+                  <span data-label="Updated">{{ world.updated }}</span><span data-label="Size">{{ world.size }}</span>
+                  <span class="table-actions" data-label="Actions">
+                    {% if world.complete and settings.WORLD_NAME != world.name %}<form method="post" action="{{ url_for('world_select', name=world.name) }}" data-confirm="Switch to {{ world.name }}? A snapshot will be created and the server will restart."><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="text-button" type="submit">Select & restart</button></form>{% endif %}
+                    <form method="post" action="{{ url_for('world_backup', name=world.name) }}" data-busy="Creating snapshot…"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="text-button" type="submit">Back up</button></form>
+                    <a href="{{ url_for('world_download', name=world.name, extension='db') }}">Download DB</a>{% if world.complete %}<a href="{{ url_for('world_download', name=world.name, extension='fwl') }}">Download FWL</a>{% endif %}
                     {% if settings.WORLD_NAME != world.name %}<form method="post" action="{{ url_for('world_delete', name=world.name) }}" data-confirm="Delete world {{ world.name }}? This cannot be undone unless you have a backup."><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="text-button danger" type="submit">Delete</button></form>{% endif %}
                   </span>
                 </div>

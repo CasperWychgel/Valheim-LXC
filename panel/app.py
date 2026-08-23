@@ -197,6 +197,8 @@ def validate_settings(form: Any) -> dict[str, str]:
         raise ValueError("Server name must contain 1 to 64 printable characters.")
     if not WORLD_NAME_RE.fullmatch(world):
         raise ValueError("World name may contain letters, numbers, spaces, dots, underscores, and hyphens.")
+    if world != settings["WORLD_NAME"]:
+        raise ValueError("Use the Worlds page to change the active world safely.")
     if not 5 <= len(password) <= 64 or any(ord(char) < 32 for char in password):
         raise ValueError("Game password must contain 5 to 64 printable characters.")
 
@@ -724,6 +726,57 @@ def set_player_banned(platform_id: str, banned: bool) -> None:
     atomic_text_write(DATA_DIR / ACCESS_FILES["bans"], content)
 
 
+def world_files_exist(name: str) -> bool:
+    if not WORLD_DIR.is_dir():
+        return False
+    expected = {
+        f"{name}.db".casefold(),
+        f"{name}.fwl".casefold(),
+        f"{name}.db.old".casefold(),
+        f"{name}.fwl.old".casefold(),
+    }
+    return any(
+        item.is_file() and item.name.casefold() in expected
+        for item in WORLD_DIR.iterdir()
+    )
+
+
+def ensure_world_change_is_safe() -> None:
+    try:
+        player_count = online_player_count()
+    except Exception as error:
+        raise RuntimeError(
+            "World changes are blocked because player activity could not be verified."
+        ) from error
+    if player_count:
+        raise RuntimeError(
+            f"World changes are blocked while {player_count} player(s) are online."
+        )
+
+
+def activate_world(name: str) -> str:
+    ensure_world_change_is_safe()
+    previous_settings = read_settings()
+    if previous_settings["WORLD_NAME"].casefold() == name.casefold():
+        raise ValueError("This world is already active.")
+
+    backup_output = control("backup")
+    updated_settings = previous_settings.copy()
+    updated_settings["WORLD_NAME"] = name
+    write_settings(updated_settings)
+    try:
+        restart_output = control("restart")
+    except (RuntimeError, subprocess.TimeoutExpired, OSError) as error:
+        write_settings(previous_settings)
+        try:
+            control("restart")
+            recovery = " The previous world configuration was restored and restarted."
+        except (RuntimeError, subprocess.TimeoutExpired, OSError):
+            recovery = " The previous configuration was restored, but its restart also failed."
+        raise RuntimeError(f"The new world could not be activated.{recovery}") from error
+    return " ".join(part for part in (backup_output, restart_output) if part)
+
+
 def create_app() -> Flask:
     config = read_panel_config()
     application = Flask(
@@ -940,12 +993,52 @@ def create_app() -> Flask:
     @application.post("/world/select/<name>")
     @login_required
     def world_select(name: str):
+        if (
+            not WORLD_NAME_RE.fullmatch(name)
+            or not (WORLD_DIR / f"{name}.db").is_file()
+            or not (WORLD_DIR / f"{name}.fwl").is_file()
+        ):
+            abort(404)
+        try:
+            activate_world(name)
+            flash(f"World {name} selected and the server restarted.", "success")
+        except (ValueError, RuntimeError, OSError, subprocess.TimeoutExpired) as error:
+            flash(str(error), "error")
+        return redirect(url_for("dashboard", tab="worlds"))
+
+    @application.post("/world/create")
+    @login_required
+    def world_create():
+        name = request.form.get("world_name", "").strip()
+        try:
+            if not WORLD_NAME_RE.fullmatch(name):
+                raise ValueError(
+                    "World name may contain letters, numbers, spaces, dots, underscores, and hyphens."
+                )
+            if world_files_exist(name):
+                raise ValueError("A world with this name already exists.")
+            activate_world(name)
+            flash(
+                f"World {name} is active. Valheim is generating its new random seed.",
+                "success",
+            )
+        except (ValueError, RuntimeError, OSError, subprocess.TimeoutExpired) as error:
+            flash(str(error), "error")
+        return redirect(url_for("dashboard", tab="worlds"))
+
+    @application.post("/world/backup/<name>")
+    @login_required
+    def world_backup(name: str):
         if not WORLD_NAME_RE.fullmatch(name) or not (WORLD_DIR / f"{name}.db").is_file():
             abort(404)
-        settings = read_settings()
-        settings["WORLD_NAME"] = name
-        write_settings(settings)
-        flash(f"World set to {name}. Restart the server to load it.", "success")
+        try:
+            control("backup")
+            flash(
+                f"Snapshot created. The archive includes {name} and the complete world library.",
+                "success",
+            )
+        except (RuntimeError, OSError, subprocess.TimeoutExpired) as error:
+            flash(str(error), "error")
         return redirect(url_for("dashboard", tab="worlds"))
 
     @application.post("/world/delete/<name>")
@@ -991,6 +1084,12 @@ def create_app() -> Flask:
         world_name = database_name[:-3]
         if descriptor_name[:-4] != world_name or not WORLD_NAME_RE.fullmatch(world_name):
             flash("The .db and .fwl filenames must use the same valid world name.", "error")
+            return redirect(url_for("dashboard", tab="worlds"))
+        if world_files_exist(world_name):
+            flash(
+                "A world with this name already exists. Delete the inactive world first or choose another name.",
+                "error",
+            )
             return redirect(url_for("dashboard", tab="worlds"))
         WORLD_DIR.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(dir=WORLD_DIR) as temporary:

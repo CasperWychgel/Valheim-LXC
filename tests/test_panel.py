@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import io
 import json
 import os
 import subprocess
@@ -81,7 +82,10 @@ class PanelIntegrationTests(unittest.TestCase):
         cls.module = importlib.util.module_from_spec(specification)
         specification.loader.exec_module(cls.module)
 
+        cls.commands: list[list[str]] = []
+
         def fake_run(command, *, timeout=20):
+            cls.commands.append(command.copy())
             if command[:3] == ["systemctl", "is-active", "--quiet"]:
                 return subprocess.CompletedProcess(command, 0, "", "")
             if command[:2] == ["systemctl", "show"]:
@@ -103,9 +107,13 @@ class PanelIntegrationTests(unittest.TestCase):
         cls.temporary.cleanup()
 
     def setUp(self) -> None:
+        self.commands.clear()
         self.panel_config.write_text(json.dumps(self.panel_payload), encoding="utf-8")
         self.server_config.write_text(self.server_text, encoding="utf-8")
         self.player_log.write_text("", encoding="utf-8")
+        for world_file in self.worlds.iterdir():
+            if world_file.is_file():
+                world_file.unlink()
         for database_file in (
             self.player_db,
             Path(f"{self.player_db}-wal"),
@@ -274,6 +282,123 @@ class PanelIntegrationTests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 302)
         self.assertEqual((self.data / "adminlist.txt").read_text(encoding="utf-8").count("Steam_123456"), 1)
+
+    def test_world_creation_snapshots_and_restarts(self) -> None:
+        self.login()
+        response = self.client.post(
+            "/world/create",
+            data={"csrf_token": self.csrf(), "world_name": "Fresh-Realm"},
+            follow_redirects=True,
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"Valheim is generating its new random seed", response.data)
+        self.assertEqual(self.module.read_settings()["WORLD_NAME"], "Fresh-Realm")
+        control_actions = [
+            command[3]
+            for command in self.commands
+            if command[:3] == ["sudo", "-n", "/fake/valheimctl"]
+        ]
+        self.assertEqual(control_actions[-2:], ["backup", "restart"])
+
+    def test_failed_world_restart_restores_the_previous_configuration(self) -> None:
+        self.login()
+        original_run = self.module.run
+        restart_calls = 0
+
+        def fail_first_restart(command, *, timeout=20):
+            nonlocal restart_calls
+            if command[:4] == ["sudo", "-n", "/fake/valheimctl", "restart"]:
+                restart_calls += 1
+                if restart_calls == 1:
+                    return subprocess.CompletedProcess(command, 1, "", "restart failed")
+            return original_run(command, timeout=timeout)
+
+        self.module.run = fail_first_restart
+        try:
+            response = self.client.post(
+                "/world/create",
+                data={"csrf_token": self.csrf(), "world_name": "Rollback-Test"},
+                follow_redirects=True,
+            )
+        finally:
+            self.module.run = original_run
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"previous world configuration was restored and restarted", response.data)
+        self.assertEqual(self.module.read_settings()["WORLD_NAME"], "Dedicated")
+        self.assertEqual(restart_calls, 2)
+
+    def test_world_creation_is_blocked_while_a_player_is_online(self) -> None:
+        self.write_player_log()
+        self.login()
+        response = self.client.post(
+            "/world/create",
+            data={"csrf_token": self.csrf(), "world_name": "Unsafe-Switch"},
+            follow_redirects=True,
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"blocked while 1 player(s) are online", response.data)
+        self.assertEqual(self.module.read_settings()["WORLD_NAME"], "Dedicated")
+        self.assertFalse(
+            any(
+                command[:4] == ["sudo", "-n", "/fake/valheimctl", "restart"]
+                for command in self.commands
+            )
+        )
+
+    def test_world_selection_requires_a_complete_pair(self) -> None:
+        (self.worlds / "Incomplete.db").write_bytes(b"database")
+        self.login()
+        response = self.client.post(
+            "/world/select/Incomplete",
+            data={"csrf_token": self.csrf()},
+        )
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(self.module.read_settings()["WORLD_NAME"], "Dedicated")
+
+    def test_world_upload_does_not_overwrite_an_existing_world(self) -> None:
+        (self.worlds / "Existing.db").write_bytes(b"original database")
+        (self.worlds / "Existing.fwl").write_bytes(b"original descriptor")
+        self.login()
+        response = self.client.post(
+            "/world/upload",
+            data={
+                "csrf_token": self.csrf(),
+                "database": (io.BytesIO(b"replacement database"), "Existing.db"),
+                "descriptor": (io.BytesIO(b"replacement descriptor"), "Existing.fwl"),
+            },
+            content_type="multipart/form-data",
+            follow_redirects=True,
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"A world with this name already exists", response.data)
+        self.assertEqual((self.worlds / "Existing.db").read_bytes(), b"original database")
+        self.assertEqual((self.worlds / "Existing.fwl").read_bytes(), b"original descriptor")
+
+    def test_settings_cannot_bypass_safe_world_switching(self) -> None:
+        self.login()
+        settings = {
+            "csrf_token": self.csrf(),
+            "SERVER_NAME": "Test Realm",
+            "WORLD_NAME": "Bypass",
+            "SERVER_PASSWORD": "TestPass",
+            "GAME_PORT": "2456",
+            "PUBLIC": "0",
+            "SAVE_INTERVAL": "1800",
+            "BACKUPS": "4",
+            "BACKUP_SHORT": "7200",
+            "BACKUP_LONG": "43200",
+            "PRESET": "Normal",
+            "COMBAT": "",
+            "DEATH_PENALTY": "",
+            "RESOURCES": "",
+            "RAIDS": "",
+            "PORTALS": "",
+        }
+        response = self.client.post("/settings", data=settings, follow_redirects=True)
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"Use the Worlds page to change the active world safely", response.data)
+        self.assertEqual(self.module.read_settings()["WORLD_NAME"], "Dedicated")
 
     def test_state_change_requires_csrf(self) -> None:
         self.login()

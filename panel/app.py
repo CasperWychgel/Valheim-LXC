@@ -622,6 +622,19 @@ def list_players() -> list[dict[str, Any]]:
     return players
 
 
+def online_player_count() -> int:
+    """Return a strict live count for unattended maintenance decisions."""
+    sync_player_history()
+    connection = player_database()
+    try:
+        row = connection.execute(
+            "SELECT COUNT(*) AS player_count FROM players WHERE online = 1"
+        ).fetchone()
+        return int(row["player_count"])
+    finally:
+        connection.close()
+
+
 def public_server_status() -> dict[str, Any]:
     settings = read_settings()
     active = service_active()
@@ -1078,11 +1091,18 @@ def set_password(username: str, password: str) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Valheim admin panel")
     parser.add_argument("--set-password", nargs=2, metavar=("USERNAME", "PASSWORD"))
+    parser.add_argument("--online-player-count", action="store_true")
     args = parser.parse_args()
     if args.set_password:
         set_password(*args.set_password)
         return
-    parser.error("Start the panel with Waitress or use --set-password.")
+    if args.online_player_count:
+        try:
+            print(online_player_count())
+        except Exception as error:
+            raise SystemExit(f"Could not determine the online player count: {error}") from error
+        return
+    parser.error("Start the panel with Waitress or use a supported command option.")
 
 
 if __name__ == "__main__":

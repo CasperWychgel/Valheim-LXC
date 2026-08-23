@@ -187,6 +187,11 @@ class PanelIntegrationTests(unittest.TestCase):
         self.assertEqual(players[0]["name"], "TeSt")
         self.assertEqual(players[0]["platform_id"], "Steam_76561197968825983")
         self.assertFalse(players[0]["online"])
+        self.assertEqual(self.module.online_player_count(), 0)
+
+    def test_strict_online_player_count(self) -> None:
+        self.write_player_log()
+        self.assertEqual(self.module.online_player_count(), 1)
 
     def test_parser_upgrade_replays_log_when_history_is_empty(self) -> None:
         self.write_player_log()
@@ -274,6 +279,17 @@ class PanelIntegrationTests(unittest.TestCase):
         self.login()
         response = self.client.post("/action/restart", data={})
         self.assertEqual(response.status_code, 400)
+
+
+class SetupDefinitionTests(unittest.TestCase):
+    def test_player_aware_daily_maintenance_units_are_installed(self) -> None:
+        setup = (PROJECT_ROOT / "setup.sh").read_text(encoding="utf-8")
+        self.assertIn('cat >"$VALHEIM_HOME/bin/daily-maintenance"', setup)
+        self.assertIn("OnCalendar=*-*-* *:00:00", setup)
+        self.assertIn("OnCalendar=*-*-* *:30:00", setup)
+        self.assertIn("update-server\" --defer-if-players", setup)
+        self.assertIn("systemctl disable --now valheim-update.timer", setup)
+        self.assertIn("valheim-maintenance.timer", setup)
 
 
 if __name__ == "__main__":

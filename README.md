@@ -24,13 +24,23 @@ The English-only base can be adapted for other SteamCMD game servers.
 - Valheim Dedicated Server (`Steam App ID 896660`) using anonymous login.
 - Clean `systemd` lifecycle handling with `SIGINT`, so Valheim can save while
   stopping.
-- Automatic Valheim build checks and portable archive timers.
+- Player-aware daily maintenance from 05:00 server time, including automatic
+  Valheim build checks and a daily restart.
+- Portable archive timers.
 - A responsive local admin panel on TCP 2460 by default.
 
 The panel provides server start/stop/restart/update actions, live container
 metrics, player activity and connection history, server settings and world
 modifiers, access lists, world upload and selection, backup
 download/restore/delete, service logs, and security controls.
+
+Daily maintenance uses the container's local server time. Beginning at 05:00,
+it checks every 30 minutes until no player is online. It then checks Steam for a
+new Valheim build. An available update is installed and its service restart also
+counts as the daily restart; otherwise the server receives one clean regular
+restart. If player activity cannot be verified, maintenance fails safe and is
+retried after another 30 minutes. A manual **Check for Valheim updates** action
+remains available on the Overview page.
 
 ## Recommended resources
 

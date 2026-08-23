@@ -80,9 +80,9 @@
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
             <button class="button" type="submit">Restart</button>
           </form>
-          <form method="post" action="{{ url_for('action', action='update') }}" data-busy="Checking Steam and updating…">
+          <form method="post" action="{{ url_for('action', action='update') }}" data-busy="Checking Steam and updating…"{% if status.player_count %} data-confirm="{{ status.player_count }} player(s) are online. If an update is available, it will restart the server immediately. Continue?"{% endif %}>
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-            <button class="button" type="submit">Check for update</button>
+            <button class="button" type="submit">Check for Valheim updates</button>
           </form>
           <form method="post" action="{{ url_for('action', action='backup') }}" data-busy="Creating archive…">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
@@ -116,6 +116,19 @@
               <p>Forward UDP {{ settings.GAME_PORT }}–{{ settings.GAME_PORT|int + 1 }} to this container for Internet players. Keep the admin panel private.</p>
             {% endif %}
           </article>
+        </section>
+
+        <section class="panel-card maintenance-card">
+          <div>
+            <p class="eyebrow">Quality of life</p>
+            <h2>Player-aware daily maintenance</h2>
+            <p>Maintenance begins at 05:00 server time. Steam is checked first; an available update is installed, otherwise Valheim receives its regular daily restart.</p>
+          </div>
+          <dl class="maintenance-facts">
+            <div><dt>Daily window</dt><dd>05:00 server time</dd></div>
+            <div><dt>Players online</dt><dd>Defer 30 minutes</dd></div>
+            <div><dt>Update available</dt><dd>Install + one restart</dd></div>
+          </dl>
         </section>
 
       {% elif tab == 'players' %}

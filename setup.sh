@@ -283,6 +283,9 @@ EOF
 cat >"$VALHEIM_HOME/bin/update-server" <<'EOF'
 #!/usr/bin/env bash
 set -Eeuo pipefail
+mode=${1:-manual}
+[[ $# -le 1 && $mode =~ ^(manual|--defer-if-players)$ ]] \
+  || { echo "Usage: update-server [--defer-if-players]" >&2; exit 2; }
 app_id=896660
 home=/opt/valheim
 manifest="$home/server/steamapps/appmanifest_$app_id.acf"
@@ -316,6 +319,23 @@ if [[ -n $installed && -n $latest && $installed == "$latest" ]]; then
   exit 0
 fi
 [[ -n $latest ]] || { echo 'Could not determine the current Steam build.' >&2; exit 1; }
+if [[ $mode == --defer-if-players ]]; then
+  if ! online_players=$(runuser -u valheim-panel -- env \
+    VALHEIM_PANEL_CONFIG=/etc/valheim/panel.json \
+    VALHEIM_SERVER_CONFIG=/etc/valheim/server.env \
+    VALHEIM_HOME=/opt/valheim \
+    VALHEIM_DATA_DIR=/opt/valheim/data \
+    VALHEIM_LOG=/opt/valheim/logs/valheim.log \
+    VALHEIM_PLAYER_DB=/var/lib/valheim-panel/players.sqlite3 \
+    python3 /opt/valheim/panel/app.py --online-player-count); then
+    echo 'Could not verify the online player count; update deferred.' >&2
+    exit 75
+  fi
+  if ((online_players > 0)); then
+    printf 'Update deferred because %s player(s) are online.\n' "$online_players"
+    exit 75
+  fi
+fi
 was_active=0
 systemctl is-active --quiet valheim.service && was_active=1
 ((was_active == 0)) || systemctl stop valheim.service
@@ -329,6 +349,80 @@ if ! runuser -u valheim -- env HOME="$home" LANG=en_US.UTF-8 \
 fi
 ((was_active == 0)) || systemctl start valheim.service
 printf 'Updated Valheim from build %s to build %s.\n' "${installed:-unknown}" "$latest"
+EOF
+
+cat >"$VALHEIM_HOME/bin/daily-maintenance" <<'EOF'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+home=/opt/valheim
+state_file=/var/lib/valheim-panel/daily-maintenance-date
+today=$(date +%F)
+hour=$(date +%H)
+
+# The timer runs every 30 minutes. Before 05:00, and after a successful
+# maintenance run on the same server-local date, there is nothing to do.
+((10#$hour >= 5)) || exit 0
+[[ $(cat "$state_file" 2>/dev/null || true) != "$today" ]] || exit 0
+
+online_player_count() {
+  runuser -u valheim-panel -- env \
+    VALHEIM_PANEL_CONFIG=/etc/valheim/panel.json \
+    VALHEIM_SERVER_CONFIG=/etc/valheim/server.env \
+    VALHEIM_HOME=/opt/valheim \
+    VALHEIM_DATA_DIR=/opt/valheim/data \
+    VALHEIM_LOG=/opt/valheim/logs/valheim.log \
+    VALHEIM_PLAYER_DB=/var/lib/valheim-panel/players.sqlite3 \
+    python3 /opt/valheim/panel/app.py --online-player-count
+}
+
+defer_maintenance() {
+  printf 'Daily maintenance deferred. The next check is in 30 minutes.\n'
+  exit 0
+}
+
+if ! online_players=$(online_player_count); then
+  echo 'Daily maintenance could not verify player activity.' >&2
+  defer_maintenance
+fi
+if ((online_players > 0)); then
+  printf 'Daily maintenance deferred because %s player(s) are online.\n' "$online_players"
+  defer_maintenance
+fi
+
+was_active=0
+systemctl is-active --quiet valheim.service && was_active=1
+set +e
+update_output=$("$home/bin/update-server" --defer-if-players 2>&1)
+update_status=$?
+set -e
+printf '%s\n' "$update_output"
+((update_status != 75)) || defer_maintenance
+((update_status == 0)) || exit "$update_status"
+
+updated=0
+grep -q '^Updated Valheim from build ' <<<"$update_output" && updated=1
+if ((was_active == 1 && updated == 0)); then
+  if ! online_players=$(online_player_count); then
+    echo 'Daily restart could not recheck player activity.' >&2
+    defer_maintenance
+  fi
+  if ((online_players > 0)); then
+    printf 'Daily restart deferred because %s player(s) connected during the update check.\n' "$online_players"
+    defer_maintenance
+  fi
+  systemctl restart valheim.service
+  echo 'Daily Valheim restart completed.'
+elif ((was_active == 1)); then
+  echo "The update restart also completed today's daily restart."
+else
+  echo 'Valheim was already stopped; the update check completed without starting it.'
+fi
+
+temporary=$(mktemp "$state_file.XXXXXX")
+printf '%s\n' "$today" >"$temporary"
+chown valheim-panel:valheim-admin "$temporary"
+chmod 0640 "$temporary"
+mv -f "$temporary" "$state_file"
 EOF
 
 cat >/usr/local/sbin/valheimctl <<'EOF'
@@ -379,8 +473,10 @@ case "$action" in
 esac
 EOF
 
-chmod 0750 "$VALHEIM_HOME/bin/start-server" "$VALHEIM_HOME/bin/backup-server" "$VALHEIM_HOME/bin/update-server"
-chown root:valheim-admin "$VALHEIM_HOME/bin/start-server" "$VALHEIM_HOME/bin/backup-server" "$VALHEIM_HOME/bin/update-server"
+chmod 0750 "$VALHEIM_HOME/bin/start-server" "$VALHEIM_HOME/bin/backup-server" \
+  "$VALHEIM_HOME/bin/update-server" "$VALHEIM_HOME/bin/daily-maintenance"
+chown root:valheim-admin "$VALHEIM_HOME/bin/start-server" "$VALHEIM_HOME/bin/backup-server" \
+  "$VALHEIM_HOME/bin/update-server" "$VALHEIM_HOME/bin/daily-maintenance"
 chmod 0755 /usr/local/sbin/valheimctl
 chown root:root /usr/local/sbin/valheimctl
 
@@ -531,35 +627,47 @@ Persistent=true
 WantedBy=timers.target
 EOF
 
-cat >/etc/systemd/system/valheim-update.service <<'EOF'
+systemctl disable --now valheim-update.timer >/dev/null 2>&1 || true
+rm -f /etc/systemd/system/valheim-update.timer /etc/systemd/system/valheim-update.service
+
+cat >/etc/systemd/system/valheim-maintenance.service <<'EOF'
 [Unit]
-Description=Install a new Valheim server build when available
+Description=Run player-aware daily Valheim maintenance
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=/opt/valheim/bin/update-server
+ExecStart=/opt/valheim/bin/daily-maintenance
+TimeoutStartSec=45min
 EOF
 
-cat >/etc/systemd/system/valheim-update.timer <<'EOF'
+cat >/etc/systemd/system/valheim-maintenance.timer <<'EOF'
 [Unit]
-Description=Check for a Valheim server update every day
+Description=Check for due Valheim maintenance every 30 minutes
 
 [Timer]
-OnCalendar=*-*-* 05:00:00
-RandomizedDelaySec=30m
+OnCalendar=*-*-* *:00:00
+OnCalendar=*-*-* *:30:00
+AccuracySec=1min
 Persistent=true
 
 [Install]
 WantedBy=timers.target
 EOF
 
+maintenance_state=/var/lib/valheim-panel/daily-maintenance-date
+if [[ ! -f $maintenance_state ]]; then
+  date +%F >"$maintenance_state"
+fi
+chown valheim-panel:valheim-admin "$maintenance_state"
+chmod 0640 "$maintenance_state"
+
 systemctl daemon-reload
-systemctl enable valheim.service valheim-panel.service valheim-backup.timer valheim-update.timer >/dev/null
+systemctl enable valheim.service valheim-panel.service valheim-backup.timer valheim-maintenance.timer >/dev/null
 systemctl restart valheim-panel.service
 systemctl restart valheim.service
-systemctl start valheim-backup.timer valheim-update.timer
+systemctl start valheim-backup.timer valheim-maintenance.timer
 
 say "Verifying the installation"
 [[ ! -s /proc/net/if_inet6 ]] || die "IPv6 is still active inside the container."
@@ -584,6 +692,8 @@ if ! systemctl is-active --quiet valheim.service; then
   journalctl -u valheim.service -n 30 --no-pager >&2 || true
   die "The Valheim server did not start."
 fi
+systemctl is-active --quiet valheim-maintenance.timer \
+  || die "The daily maintenance timer is not active."
 
 host_ip=$(hostname -I | awk '{print $1}')
 if ((PANEL_CONFIG_CREATED == 1)); then
@@ -608,6 +718,7 @@ Valheim is installed.
   Panel password:  $panel_password_display
   Game endpoint:   $host_ip:$GAME_PORT
   Game password:   $game_password_display
+  Maintenance:     Daily from 05:00 server time; 30-minute player deferral
 
 Reset the panel login from the LXC console with:
   valheim-panel-password USERNAME NEW_PASSWORD

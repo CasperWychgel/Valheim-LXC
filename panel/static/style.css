@@ -111,6 +111,13 @@ small { color: var(--muted); }
 .panel-card { margin-bottom: 14px; padding: 24px; border: 1px solid var(--line-soft); border-radius: var(--radius); background: linear-gradient(145deg, rgba(30,37,33,.97), rgba(22,27,24,.97)); box-shadow: 0 12px 38px rgba(0, 0, 0, .12); }
 .panel-card p { color: var(--muted); }
 .note-card { border-color: #463e2b; background: linear-gradient(145deg, rgba(50, 44, 29, .58), rgba(24, 28, 25, .98)); }
+.maintenance-card { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(420px, 1fr); align-items: center; gap: 40px; border-color: #463e2b; }
+.maintenance-card > div > p:last-child { max-width: 720px; margin-bottom: 0; }
+.maintenance-facts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin: 0; }
+.maintenance-facts div { padding: 12px; border: 1px solid var(--line-soft); border-radius: 10px; background: rgba(12, 16, 13, .38); }
+.maintenance-facts dt, .maintenance-facts dd { margin: 0; }
+.maintenance-facts dt { color: #7f8a83; font-size: .62rem; letter-spacing: .08em; text-transform: uppercase; }
+.maintenance-facts dd { margin-top: 5px; color: var(--text); font-size: .76rem; font-weight: 650; }
 .card-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; margin-bottom: 20px; }
 .card-heading h2, .card-heading p { margin-bottom: 0; }
 .card-heading > p { max-width: 420px; font-size: .82rem; text-align: right; }
@@ -230,6 +237,7 @@ input[type="file"]::file-selector-button { margin-right: 10px; padding: 5px 9px;
   .upload-card { align-items: flex-start; flex-direction: column; gap: 20px; }
   .upload-form { width: 100%; }
   .form-grid.four, .toggle-grid.four { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .maintenance-card { grid-template-columns: 1fr; gap: 20px; }
 }
 
 @media (max-width: 820px) {
@@ -274,6 +282,7 @@ input[type="file"]::file-selector-button { margin-right: 10px; padding: 5px 9px;
   .sticky-actions { align-items: stretch; flex-direction: column; }
   .sticky-actions .button { width: 100%; }
   .login-server-grid { grid-template-columns: 1fr; }
+  .maintenance-facts { grid-template-columns: 1fr; }
 }
 
 @media (prefers-reduced-motion: reduce) {

@@ -35,6 +35,7 @@ screen.
 
 For a vanilla server with up to ten players:
 
+- An amd64/x86-64 Proxmox VE host; ARM64 hosts are not supported by this project
 - 4 modern CPU cores with good single-core performance
 - 4 GB RAM
 - 60 GB SSD-backed storage
@@ -168,6 +169,27 @@ allow-listed `valheimctl` helper.
 The installer enables the Proxmox firewall flag on the LXC interface but does
 not create Datacenter/Node/Guest firewall policy. Apply rules appropriate for
 your Proxmox environment.
+
+Debian 13 uses systemd 257, so the installer enables the Proxmox LXC
+`nesting=1` feature. Proxmox documents that nesting exposes some host `procfs`
+and `sysfs` contents to the guest; the container therefore remains
+unprivileged and should only run the intended server stack.
+
+## Container startup troubleshooting
+
+If an older installer selected a template whose name ends in `_arm64.tar.zst`,
+that container cannot be used for this Valheim installation. Check the host and
+failed container with:
+
+```bash
+dpkg --print-architecture
+pct config 101
+pct start 101 --debug
+```
+
+The host must report `amd64`. The current installer filters explicitly for a
+Debian 13 `_amd64` template, enables nesting before the first start, and stops
+immediately if the container cannot start.
 
 ## Operations and recovery
 

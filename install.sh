@@ -4,6 +4,7 @@
 set -Eeuo pipefail
 
 PROJECT_NAME="Valheim LXC"
+REQUIRED_ARCH="amd64"
 DEFAULT_REPO_RAW="https://raw.githubusercontent.com/FuBoByte/Valheim-LXC/main"
 REPO_RAW=${REPO_RAW:-$DEFAULT_REPO_RAW}
 REPO_RAW=${REPO_RAW%/}
@@ -109,6 +110,10 @@ done
 command -v pct >/dev/null 2>&1 || die "pct was not found. Run this installer on a Proxmox VE host."
 command -v pveam >/dev/null 2>&1 || die "pveam was not found. Run this installer on a Proxmox VE host."
 [[ $(id -u) -eq 0 ]] || die "Run this installer as root."
+
+HOST_ARCH=$(dpkg --print-architecture 2>/dev/null || true)
+[[ $HOST_ARCH == "$REQUIRED_ARCH" ]] || die \
+  "This project requires an amd64 (x86-64) Proxmox host. Detected host architecture: ${HOST_ARCH:-unknown}. Valheim's Linux server cannot run natively in an ARM64 LXC."
 
 SOURCE_ROOT=""
 if [[ -n ${BASH_SOURCE[0]:-} && -f ${BASH_SOURCE[0]:-} ]]; then
@@ -235,6 +240,7 @@ Configuration summary
   VLAN:       ${VLAN_ID:-none}
   Resources:  $CORES cores, $MEMORY_MB MB RAM, $DISK_GB GB disk
   Storage:    $ROOTFS_STORAGE (template: $TEMPLATE_STORAGE)
+  Platform:   amd64, unprivileged LXC with nesting enabled
 
 EOF
   read -r -p "Create the container now? [Y/n]: " confirm
@@ -244,10 +250,10 @@ fi
 info "Refreshing the Proxmox appliance catalog"
 pveam update >/dev/null
 TEMPLATE=$(pveam available --section system 2>/dev/null \
-  | awk '$2 ~ /^debian-13-standard_/ {print $2}' \
+  | awk '$2 ~ /^debian-13-standard_.*_amd64\.tar\.(zst|xz|gz)$/ {print $2}' \
   | sort -V \
   | tail -n 1)
-[[ -n $TEMPLATE ]] || die "No Debian 13 standard LXC template is available from pveam."
+[[ -n $TEMPLATE ]] || die "No Debian 13 amd64 standard LXC template is available from pveam."
 
 if ! pveam list "$TEMPLATE_STORAGE" 2>/dev/null | grep -Fq "/$TEMPLATE"; then
   info "Downloading the latest Debian 13 template: $TEMPLATE"
@@ -262,9 +268,9 @@ else
 fi
 [[ -z $VLAN_ID ]] || NET_CONFIG+=",tag=$VLAN_ID"
 
-info "Creating unprivileged Debian 13 LXC $CTID"
+info "Creating unprivileged Debian 13 amd64 LXC $CTID"
 pct create "$CTID" "$TEMPLATE_STORAGE:vztmpl/$TEMPLATE" \
-  --arch amd64 \
+  --arch "$REQUIRED_ARCH" \
   --ostype debian \
   --hostname "$CT_HOSTNAME" \
   --cores "$CORES" \
@@ -273,8 +279,14 @@ pct create "$CTID" "$TEMPLATE_STORAGE:vztmpl/$TEMPLATE" \
   --rootfs "$ROOTFS_STORAGE:$DISK_GB" \
   --net0 "$NET_CONFIG" \
   --unprivileged 1 \
+  --features nesting=1 \
   --onboot 1 \
-  --start 1
+  --start 0
+
+info "Starting container $CTID"
+if ! pct start "$CTID"; then
+  die "Container $CTID could not be started. Run 'pct start $CTID --debug' on the Proxmox host for the detailed cause."
+fi
 
 info "Waiting for networking inside the container"
 CONTAINER_IP=""

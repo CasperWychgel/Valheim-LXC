@@ -116,14 +116,14 @@ install -d -o root -g valheim-admin -m 2770 /etc/valheim
 say "Installing SteamCMD from Valve"
 if [[ ! -x $VALHEIM_HOME/steamcmd/steamcmd.sh ]]; then
   steam_archive=$(mktemp)
-  chown valheim:valheim-admin "$steam_archive"
-  chmod 0600 "$steam_archive"
   if ! curl --retry 3 --retry-delay 2 --connect-timeout 15 -fsSL \
     https://steamcdn-a.akamaihd.net/client/installer/steamcmd_linux.tar.gz \
     -o "$steam_archive"; then
     rm -f "$steam_archive"
     die "Could not download SteamCMD from Valve."
   fi
+  chown valheim:valheim-admin "$steam_archive"
+  chmod 0600 "$steam_archive"
   if ! runuser -u valheim -- tar -xzf "$steam_archive" -C "$VALHEIM_HOME/steamcmd"; then
     rm -f "$steam_archive"
     die "The SteamCMD archive could not be extracted as the valheim user."
@@ -146,6 +146,22 @@ runuser -u valheim -- env HOME="$VALHEIM_HOME" LANG=en_US.UTF-8 \
   +app_update "$APP_ID" validate \
   +quit 2>&1 | tee -a "$VALHEIM_HOME/logs/steamcmd-install.log"
 [[ -x $VALHEIM_HOME/server/valheim_server.x86_64 ]] || die "SteamCMD did not install the Valheim server successfully. See $VALHEIM_HOME/logs/steamcmd-install.log."
+
+# SteamCMD is a 32-bit bootstrapper even on amd64 Debian. Keep the conventional
+# Steam SDK paths available for Valheim and other dedicated server binaries.
+install -d -o valheim -g valheim-admin -m 0750 \
+  "$VALHEIM_HOME/.steam" \
+  "$VALHEIM_HOME/.steam/sdk32" \
+  "$VALHEIM_HOME/.steam/sdk64"
+for sdk_bits in 32 64; do
+  steam_client="$VALHEIM_HOME/steamcmd/linux$sdk_bits/steamclient.so"
+  if [[ -f $steam_client ]]; then
+    runuser -u valheim -- ln -sfn "$steam_client" \
+      "$VALHEIM_HOME/.steam/sdk$sdk_bits/steamclient.so"
+    runuser -u valheim -- ln -sfn "$steam_client" \
+      "$VALHEIM_HOME/.steam/sdk$sdk_bits/steamservice.so"
+  fi
+done
 
 say "Writing the server configuration and maintenance tools"
 SERVER_CONFIG_CREATED=0

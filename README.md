@@ -177,6 +177,25 @@ Debian 13 uses systemd 257, so the installer enables the Proxmox LXC
 and `sysfs` contents to the guest; the container therefore remains
 unprivileged and should only run the intended server stack.
 
+## Debian 12 and Debian 13 SteamCMD notes
+
+SteamCMD uses a 32-bit bootstrapper on amd64 Linux. Following Valve's Debian and
+Ubuntu guidance, the setup enables the `i386` architecture before installing
+the required 32-bit GCC, C++, and C runtime libraries. SteamCMD and the game
+server always run under the dedicated, non-root `valheim` account.
+
+Debian's packaged `steamcmd` requires repository components such as `non-free`,
+whose source configuration differs between Debian 12 and Debian 13. This project
+deliberately avoids modifying Debian repository components: it downloads
+Valve's official SteamCMD archive directly and installs only its runtime
+dependencies from Debian. Conventional `~/.steam/sdk32` and `sdk64` library
+paths are created for compatibility with Valheim and future SteamCMD server
+projects.
+
+The project itself remains intentionally limited to Debian 13. The Debian 12
+notes explain the upstream packaging difference; they do not declare Debian 12
+as a supported installation target.
+
 ## Container startup troubleshooting
 
 If an older installer selected a template whose name ends in `_arm64.tar.zst`,

@@ -7,15 +7,16 @@ panel.
 Project repository: [FuBoByte/Valheim-LXC](https://github.com/FuBoByte/Valheim-LXC)
 
 The project is built around the public SteamCMD, Valheim, Debian, and Proxmox
-interfaces documented by their respective maintainers. It uses a permissive MIT
-license and an English-only base so it can be adapted for other SteamCMD game
-servers.
+interfaces documented by their respective maintainers. It is maintained as a
+non-profit, community-oriented repository and uses a permissive MIT license.
+The English-only base can be adapted for other SteamCMD game servers.
 
 ## What it installs
 
 - The newest Debian 13 standard template currently offered by `pveam`.
 - An unprivileged, auto-starting LXC with a configurable hostname, interface,
   IP/subnet, gateway, VLAN, and root disk size.
+- IPv6 disabled in both the Proxmox network configuration and Debian guest.
 - The `en_US.UTF-8` locale at both operating-system and service level.
 - A dedicated `valheim` service account and a separately unprivileged
   `valheim-panel` account.
@@ -159,6 +160,7 @@ allow-listed `valheimctl` helper.
 
 ## Network behavior
 
+- **IPv6:** disabled; the container uses IPv4 only.
 - **Steam backend (default):** forward the configured UDP base port and the
   following port to the container when Internet players must connect.
 - **Crossplay backend:** enable Crossplay in the panel, restart the server, and

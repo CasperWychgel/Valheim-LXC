@@ -262,9 +262,9 @@ fi
 
 NET_CONFIG="name=$NIC_NAME,bridge=$BRIDGE,firewall=1"
 if [[ ${IP_ADDRESS,,} == dhcp ]]; then
-  NET_CONFIG+=",ip=dhcp,ip6=auto"
+  NET_CONFIG+=",ip=dhcp,ip6=manual"
 else
-  NET_CONFIG+=",ip=$IP_ADDRESS/$SUBNET,gw=$GATEWAY,ip6=auto"
+  NET_CONFIG+=",ip=$IP_ADDRESS/$SUBNET,gw=$GATEWAY,ip6=manual"
 fi
 [[ -z $VLAN_ID ]] || NET_CONFIG+=",tag=$VLAN_ID"
 

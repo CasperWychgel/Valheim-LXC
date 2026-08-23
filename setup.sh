@@ -22,6 +22,7 @@ PANEL_PASSWORD=${PANEL_PASSWORD:-}
 PANEL_PORT=${PANEL_PORT:-2460}
 
 green='\033[1;32m'
+yellow='\033[1;33m'
 red='\033[1;31m'
 reset='\033[0m'
 step=0
@@ -53,12 +54,12 @@ if [[ -z $PANEL_PASSWORD ]]; then
 fi
 (( ${#PANEL_PASSWORD} >= 12 )) || die "The panel password must contain at least 12 characters."
 
-say "Configuring the en_US.UTF-8 system locale"
+say "Configuring the en_US.UTF-8 locale and disabling IPv6"
 export DEBIAN_FRONTEND=noninteractive
 export LANG=C.UTF-8
 export LC_ALL=C.UTF-8
 apt-get update -qq
-apt-get install -y -qq --no-install-recommends locales ca-certificates curl >/dev/null
+apt-get install -y -qq --no-install-recommends locales ca-certificates curl procps >/dev/null
 if grep -Eq '^# *en_US.UTF-8 UTF-8' /etc/locale.gen; then
   sed -i -E 's/^# *(en_US.UTF-8 UTF-8)/\1/' /etc/locale.gen
 elif ! grep -Eq '^en_US.UTF-8 UTF-8' /etc/locale.gen; then
@@ -66,12 +67,22 @@ elif ! grep -Eq '^en_US.UTF-8 UTF-8' /etc/locale.gen; then
 fi
 locale-gen en_US.UTF-8 >/dev/null
 update-locale LANG=en_US.UTF-8 LANGUAGE=en_US:en
+cat >/etc/sysctl.d/99-valheim-disable-ipv6.conf <<'EOF'
+net.ipv6.conf.all.disable_ipv6 = 1
+net.ipv6.conf.default.disable_ipv6 = 1
+net.ipv6.conf.lo.disable_ipv6 = 1
+EOF
+if [[ -d /proc/sys/net/ipv6 ]]; then
+  if ! sysctl -q -p /etc/sysctl.d/99-valheim-disable-ipv6.conf; then
+    die "IPv6 could not be disabled inside the container."
+  fi
+fi
 
 say "Installing Steam and Valheim runtime dependencies"
 dpkg --add-architecture i386
 apt-get update -qq
 apt-get install -y -qq --no-install-recommends \
-  bash coreutils findutils grep gawk sed procps util-linux \
+  bash coreutils findutils grep gawk sed util-linux \
   tar gzip unzip jq sudo \
   lib32gcc-s1 lib32stdc++6 libc6-i386 \
   libatomic1 libpulse0 libpulse-dev libpulse-mainloop-glib0 \
@@ -105,13 +116,25 @@ install -d -o root -g valheim-admin -m 2770 /etc/valheim
 say "Installing SteamCMD from Valve"
 if [[ ! -x $VALHEIM_HOME/steamcmd/steamcmd.sh ]]; then
   steam_archive=$(mktemp)
-  curl -fsSL https://steamcdn-a.akamaihd.net/client/installer/steamcmd_linux.tar.gz -o "$steam_archive"
-  runuser -u valheim -- tar -xzf "$steam_archive" -C "$VALHEIM_HOME/steamcmd"
+  chown valheim:valheim-admin "$steam_archive"
+  chmod 0600 "$steam_archive"
+  if ! curl --retry 3 --retry-delay 2 --connect-timeout 15 -fsSL \
+    https://steamcdn-a.akamaihd.net/client/installer/steamcmd_linux.tar.gz \
+    -o "$steam_archive"; then
+    rm -f "$steam_archive"
+    die "Could not download SteamCMD from Valve."
+  fi
+  if ! runuser -u valheim -- tar -xzf "$steam_archive" -C "$VALHEIM_HOME/steamcmd"; then
+    rm -f "$steam_archive"
+    die "The SteamCMD archive could not be extracted as the valheim user."
+  fi
   rm -f "$steam_archive"
 fi
 chown -R valheim:valheim-admin "$VALHEIM_HOME/steamcmd"
 
 say "Installing Valheim Dedicated Server with anonymous Steam login"
+printf "%bNote:%b The Valheim download may take several minutes. Please keep this window open.\n" \
+  "$yellow" "$reset"
 # The first SteamCMD invocation may update and re-exec itself. Warm it up before app_update.
 runuser -u valheim -- env HOME="$VALHEIM_HOME" LANG=en_US.UTF-8 \
   "$VALHEIM_HOME/steamcmd/steamcmd.sh" +login anonymous +quit \
@@ -519,6 +542,7 @@ systemctl restart valheim.service
 systemctl start valheim-backup.timer valheim-update.timer
 
 say "Verifying the installation"
+[[ ! -s /proc/net/if_inet6 ]] || die "IPv6 is still active inside the container."
 panel_ready=0
 for _ in $(seq 1 30); do
   if systemctl is-active --quiet valheim-panel.service \

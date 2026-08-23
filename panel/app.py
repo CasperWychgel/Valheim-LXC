@@ -71,10 +71,11 @@ PLATFORM_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_:-]{1,127}$")
 LOG_TIMESTAMP_RE = re.compile(r"^(?P<timestamp>\d{2}/\d{2}/\d{4} \d{2}:\d{2}:\d{2}):\s*(?P<message>.*)$")
 HANDSHAKE_RE = re.compile(r"Got handshake from client\s+(?P<identifier>[A-Za-z0-9_:-]+)")
 CHARACTER_RE = re.compile(
-    r"Got character ZDOID from\s+(?P<name>.+?)\s*:\s*(?P<zdo>[0-9]+:[0-9]+)"
+    r"Got character ZDOID from\s+(?P<name>.+?)\s*:\s*(?P<zdo>-?[0-9]+:-?[0-9]+)"
 )
 CLOSING_SOCKET_RE = re.compile(r"Closing socket\s+(?P<identifier>[A-Za-z0-9_:-]+)")
 MAX_PLAYERS = 10
+PLAYER_PARSER_VERSION = "2"
 
 DEFAULT_SETTINGS = {
     "SERVER_NAME": "Valheim Dedicated Server",
@@ -504,6 +505,17 @@ def sync_player_history() -> None:
     now = time.time()
     try:
         connection.execute("BEGIN IMMEDIATE")
+        parser_version = tracker_meta(connection, "parser_version")
+        if parser_version != PLAYER_PARSER_VERSION:
+            known_players = connection.execute("SELECT COUNT(*) FROM players").fetchone()[0]
+            connection.execute("DELETE FROM pending_connections")
+            if known_players == 0:
+                # Earlier parser versions rejected signed Valheim ZDOIDs. Re-read
+                # the current log when no usable history was created yet.
+                set_tracker_meta(connection, "log_offset", "0")
+                set_tracker_meta(connection, "log_signature", "")
+            set_tracker_meta(connection, "parser_version", PLAYER_PARSER_VERSION)
+
         instance_token = service_instance_token()
         previous_instance = tracker_meta(connection, "service_instance")
         if previous_instance and previous_instance != instance_token:

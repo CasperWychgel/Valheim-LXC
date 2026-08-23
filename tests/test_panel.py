@@ -120,7 +120,7 @@ class PanelIntegrationTests(unittest.TestCase):
         lines = [
             "08/23/2026 14:20:57: Got handshake from client 76561197968825983",
             "08/23/2026 14:21:08: Server: New peer connected,sending global keys",
-            "08/23/2026 14:21:17: Got character ZDOID from TeSt : 614124615:1",
+            "08/23/2026 14:21:17: Got character ZDOID from TeSt : -276917612:4",
             "08/23/2026 14:21:22: Got character ZDOID from TeSt : 0:0",
         ]
         if disconnected:
@@ -187,6 +187,21 @@ class PanelIntegrationTests(unittest.TestCase):
         self.assertEqual(players[0]["name"], "TeSt")
         self.assertEqual(players[0]["platform_id"], "Steam_76561197968825983")
         self.assertFalse(players[0]["online"])
+
+    def test_parser_upgrade_replays_log_when_history_is_empty(self) -> None:
+        self.write_player_log()
+        stat = self.player_log.stat()
+        connection = self.module.player_database()
+        self.module.set_tracker_meta(connection, "parser_version", "1")
+        self.module.set_tracker_meta(connection, "log_signature", f"{stat.st_dev}:{stat.st_ino}")
+        self.module.set_tracker_meta(connection, "log_offset", str(stat.st_size))
+        connection.commit()
+        connection.close()
+
+        players = self.module.list_players()
+        self.assertEqual(len(players), 1)
+        self.assertEqual(players[0]["name"], "TeSt")
+        self.assertTrue(players[0]["online"])
 
     def test_authenticated_player_page_and_ban_action(self) -> None:
         self.write_player_log()

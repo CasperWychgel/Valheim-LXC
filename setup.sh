@@ -4,8 +4,14 @@
 set -Eeuo pipefail
 
 VALHEIM_HOME=${VALHEIM_HOME:-/opt/valheim}
-SOURCE_DIR=${SOURCE_DIR:-$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)}
-REPO_RAW=${REPO_RAW:-}
+SCRIPT_DIR=""
+if [[ -n ${BASH_SOURCE[0]:-} && -f ${BASH_SOURCE[0]:-} ]]; then
+  SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
+fi
+SOURCE_DIR=${SOURCE_DIR:-$SCRIPT_DIR}
+DEFAULT_REPO_RAW="https://raw.githubusercontent.com/FuBoByte/Valheim-LXC/main"
+REPO_RAW=${REPO_RAW:-$DEFAULT_REPO_RAW}
+REPO_RAW=${REPO_RAW%/}
 APP_ID=896660
 SERVER_NAME=${SERVER_NAME:-Valheim Dedicated Server}
 WORLD_NAME=${WORLD_NAME:-Dedicated}
@@ -347,14 +353,15 @@ visudo -cf /etc/sudoers.d/valheim-panel >/dev/null
 say "Installing the English admin panel"
 copy_asset() {
   local relative=$1 destination=$2
-  if [[ -f $SOURCE_DIR/$relative ]]; then
+  if [[ -n $SOURCE_DIR && -f $SOURCE_DIR/$relative ]]; then
     install -o valheim-panel -g valheim-admin -m 0640 "$SOURCE_DIR/$relative" "$destination"
-  elif [[ -n $REPO_RAW ]]; then
-    curl -fsSL "$REPO_RAW/$relative" -o "$destination"
+  else
+    if ! curl --retry 3 --retry-delay 2 --connect-timeout 15 -fsSL \
+      "$REPO_RAW/$relative" -o "$destination"; then
+      die "Could not download panel asset: $relative"
+    fi
     chown valheim-panel:valheim-admin "$destination"
     chmod 0640 "$destination"
-  else
-    die "Missing panel asset: $relative"
   fi
 }
 copy_asset panel/app.py "$VALHEIM_HOME/panel/app.py"

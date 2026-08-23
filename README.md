@@ -4,6 +4,8 @@ Create an unprivileged Debian 13 LXC, install SteamCMD and Valheim Dedicated
 Server, and manage it through a private English (United States), UTF-8 web
 panel.
 
+Project repository: [FuBoByte/Valheim-LXC](https://github.com/FuBoByte/Valheim-LXC)
+
 The project is built around the public SteamCMD, Valheim, Debian, and Proxmox
 interfaces documented by their respective maintainers. It uses a permissive MIT
 license and an English-only base so it can be adapted for other SteamCMD game
@@ -41,9 +43,30 @@ The interactive installer uses these defaults. Increase memory to at least 8 GB
 for a modded deployment. Valheim currently uses the selected base UDP port and
 the next UDP port; the default range is 2456-2457.
 
-## Installation on a Proxmox VE host
+## Online installation on a Proxmox VE host
 
-Copy or clone the complete project directory to the Proxmox host, then run:
+Open the Proxmox VE shell, become `root`, and run:
+
+```bash
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/FuBoByte/Valheim-LXC/main/install.sh)"
+```
+
+The installer keeps standard input connected to the terminal, so the interactive
+questions work normally. It downloads the remaining setup and panel files from
+the public `main` branch before creating the container.
+
+If you prefer to inspect the installer first:
+
+```bash
+curl -fsSLo /tmp/valheim-lxc-install.sh \
+  https://raw.githubusercontent.com/FuBoByte/Valheim-LXC/main/install.sh
+less /tmp/valheim-lxc-install.sh
+bash /tmp/valheim-lxc-install.sh
+```
+
+### Installation from a local checkout
+
+Clone or copy the complete project directory to the Proxmox host, then run:
 
 ```bash
 chmod +x install.sh
@@ -81,20 +104,22 @@ output includes the container address and generated game/panel passwords.
 Run `./install.sh --help` for every flag. The same values can be supplied as
 environment variables.
 
-### Remote one-line use after publishing
-
-Until this repository has a public URL, use the complete local checkout. After
-publishing it, the installer also supports a one-line launch by providing the
-raw branch URL:
+### Non-interactive online example
 
 ```bash
-export REPO_RAW="https://downloads.example.net/valheim-lxc/main"
-bash -c "$(curl -fsSL "$REPO_RAW/install.sh")"
+CTID=240 \
+LXC_HOSTNAME=valheim-prod \
+IP_ADDRESS=192.168.20.40 \
+SUBNET=24 \
+GATEWAY=192.168.20.1 \
+VLAN_ID=20 \
+INTERACTIVE=0 \
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/FuBoByte/Valheim-LXC/main/install.sh)"
 ```
 
-Replace the example address with the final HTTPS location that serves the raw
-project files. `REPO_RAW` lets the initial script fetch the panel assets required
-inside the new container and is independent of a particular source host.
+`REPO_RAW` already points to this repository's public `main` branch. Set it only
+to test another branch or use a fork, for example
+`REPO_RAW=https://raw.githubusercontent.com/OWNER/REPOSITORY/BRANCH`.
 
 ## Installation inside an existing Debian 13 system
 
@@ -103,6 +128,14 @@ only the server stack into an existing clean amd64 Debian 13 system:
 
 ```bash
 sudo bash setup.sh
+```
+
+Without a local checkout, download and run the standalone setup script. It will
+retrieve its required panel files from this repository:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/FuBoByte/Valheim-LXC/main/setup.sh \
+  | sudo bash
 ```
 
 Optional environment variables include `SERVER_NAME`, `WORLD_NAME`,

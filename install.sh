@@ -4,7 +4,9 @@
 set -Eeuo pipefail
 
 PROJECT_NAME="Valheim LXC"
-REPO_RAW=${REPO_RAW:-}
+DEFAULT_REPO_RAW="https://raw.githubusercontent.com/FuBoByte/Valheim-LXC/main"
+REPO_RAW=${REPO_RAW:-$DEFAULT_REPO_RAW}
+REPO_RAW=${REPO_RAW%/}
 CTID=${CTID:-}
 CT_HOSTNAME=${LXC_HOSTNAME:-valheim}
 NIC_NAME=${NIC_NAME:-eth0}
@@ -22,6 +24,15 @@ TEMPLATE_STORAGE=${TEMPLATE_STORAGE:-}
 PANEL_PORT=${PANEL_PORT:-2460}
 GAME_PORT=${GAME_PORT:-2456}
 INTERACTIVE=${INTERACTIVE:-auto}
+
+PROJECT_FILES=(
+  setup.sh
+  panel/app.py
+  panel/templates/login.html
+  panel/templates/dashboard.html
+  panel/static/style.css
+  panel/static/app.js
+)
 
 green='\033[1;32m'
 yellow='\033[1;33m'
@@ -65,8 +76,9 @@ Usage: bash install.sh [options]
   --non-interactive         Use flags/environment values without prompts
   -h, --help                Show this help
 
-Every setting can also be supplied as an environment variable. For a remote
-one-line install, set REPO_RAW to the raw URL of this repository's branch.
+Every setting can also be supplied as an environment variable. Online installs
+download supporting files from the project's public main branch. Set REPO_RAW
+only when you need to use a fork or another branch.
 EOF
 }
 
@@ -97,6 +109,30 @@ done
 command -v pct >/dev/null 2>&1 || die "pct was not found. Run this installer on a Proxmox VE host."
 command -v pveam >/dev/null 2>&1 || die "pveam was not found. Run this installer on a Proxmox VE host."
 [[ $(id -u) -eq 0 ]] || die "Run this installer as root."
+
+SOURCE_ROOT=""
+if [[ -n ${BASH_SOURCE[0]:-} && -f ${BASH_SOURCE[0]:-} ]]; then
+  SOURCE_ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd -P || true)
+fi
+
+USE_LOCAL_SOURCE=1
+for relative in "${PROJECT_FILES[@]}"; do
+  if [[ -z $SOURCE_ROOT || ! -f $SOURCE_ROOT/$relative ]]; then
+    USE_LOCAL_SOURCE=0
+    break
+  fi
+done
+
+if ((USE_LOCAL_SOURCE == 0)); then
+  command -v curl >/dev/null 2>&1 || die "curl is required for an online installation."
+  info "Checking the online installation files"
+  for relative in "${PROJECT_FILES[@]}"; do
+    if ! curl --retry 3 --retry-delay 2 --connect-timeout 15 -fsSL \
+      "$REPO_RAW/$relative" -o /dev/null; then
+      die "Could not download $relative from $REPO_RAW. No container was created."
+    fi
+  done
+fi
 
 if [[ $INTERACTIVE == auto ]]; then
   if [[ -t 0 ]]; then INTERACTIVE=1; else INTERACTIVE=0; fi
@@ -249,19 +285,12 @@ for _ in $(seq 1 45); do
 done
 [[ -n $CONTAINER_IP ]] || die "The container did not receive an IP address within 90 seconds."
 
-SOURCE_ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd -P || true)
 REMOTE_STAGE=/tmp/valheim-lxc-installer
 pct exec "$CTID" -- mkdir -p "$REMOTE_STAGE/panel/templates" "$REMOTE_STAGE/panel/static"
 
 push_local_project() {
   local relative
-  for relative in \
-    setup.sh \
-    panel/app.py \
-    panel/templates/login.html \
-    panel/templates/dashboard.html \
-    panel/static/style.css \
-    panel/static/app.js; do
+  for relative in "${PROJECT_FILES[@]}"; do
     [[ -f "$SOURCE_ROOT/$relative" ]] || die "Required project file is missing: $relative"
     pct push "$CTID" "$SOURCE_ROOT/$relative" "$REMOTE_STAGE/$relative"
   done
@@ -269,22 +298,19 @@ push_local_project() {
 
 push_remote_project() {
   local relative temp_file
-  [[ -n $REPO_RAW ]] || die "The installer was started without its repository files. Set REPO_RAW to this project's raw branch URL."
   temp_file=$(mktemp)
-  for relative in \
-    setup.sh \
-    panel/app.py \
-    panel/templates/login.html \
-    panel/templates/dashboard.html \
-    panel/static/style.css \
-    panel/static/app.js; do
-    curl -fsSL "$REPO_RAW/$relative" -o "$temp_file"
+  for relative in "${PROJECT_FILES[@]}"; do
+    if ! curl --retry 3 --retry-delay 2 --connect-timeout 15 -fsSL \
+      "$REPO_RAW/$relative" -o "$temp_file"; then
+      rm -f "$temp_file"
+      die "Could not download $relative from $REPO_RAW."
+    fi
     pct push "$CTID" "$temp_file" "$REMOTE_STAGE/$relative"
   done
   rm -f "$temp_file"
 }
 
-if [[ -n $SOURCE_ROOT && -f "$SOURCE_ROOT/setup.sh" && -d "$SOURCE_ROOT/panel" ]]; then
+if ((USE_LOCAL_SOURCE == 1)); then
   push_local_project
 else
   push_remote_project

@@ -26,7 +26,7 @@ yellow='\033[1;33m'
 red='\033[1;31m'
 reset='\033[0m'
 step=0
-total_steps=8
+total_steps=9
 
 say() { step=$((step + 1)); printf "%b[%s/%s]%b %s\n" "$green" "$step" "$total_steps" "$reset" "$*"; }
 die() { printf "%bError:%b %s\n" "$red" "$reset" "$*" >&2; exit 1; }
@@ -110,7 +110,8 @@ install -d -o valheim -g valheim-admin -m 2770 \
 install -d -o valheim-panel -g valheim-admin -m 0750 \
   "$VALHEIM_HOME/panel" \
   "$VALHEIM_HOME/panel/templates" \
-  "$VALHEIM_HOME/panel/static"
+  "$VALHEIM_HOME/panel/static" \
+  /var/lib/valheim-panel
 install -d -o root -g valheim-admin -m 2770 /etc/valheim
 
 say "Installing SteamCMD from Valve"
@@ -427,6 +428,7 @@ config = {
     "username": os.environ["PANEL_USERNAME"],
     "password_hash": f"pbkdf2_sha256${iterations}${salt.hex()}${digest.hex()}",
     "session_secret": secrets.token_urlsafe(48),
+    "show_player_names_on_login": True,
 }
 Path("/etc/valheim/panel.json").write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
 PY
@@ -491,6 +493,8 @@ SupplementaryGroups=valheim-admin
 Environment=LANG=en_US.UTF-8
 Environment=VALHEIM_PANEL_PORT=$PANEL_PORT
 Environment=VALHEIM_PANEL_CONFIG=/etc/valheim/panel.json
+Environment=VALHEIM_LOG=/opt/valheim/logs/valheim.log
+Environment=VALHEIM_PLAYER_DB=/var/lib/valheim-panel/players.sqlite3
 WorkingDirectory=/opt/valheim/panel
 ExecStart=/usr/bin/python3 -m waitress --host=0.0.0.0 --port=$PANEL_PORT app:app
 Restart=always
@@ -498,7 +502,7 @@ RestartSec=5
 PrivateTmp=true
 ProtectHome=true
 ProtectSystem=full
-ReadWritePaths=/etc/valheim /opt/valheim/data /opt/valheim/backups
+ReadWritePaths=/etc/valheim /opt/valheim/data /opt/valheim/backups /var/lib/valheim-panel
 
 [Install]
 WantedBy=multi-user.target
@@ -559,17 +563,27 @@ systemctl start valheim-backup.timer valheim-update.timer
 
 say "Verifying the installation"
 [[ ! -s /proc/net/if_inet6 ]] || die "IPv6 is still active inside the container."
+printf "%bNote:%b Waiting up to 30 seconds for the admin panel to become ready.\n" \
+  "$yellow" "$reset"
 panel_ready=0
 for _ in $(seq 1 30); do
   if systemctl is-active --quiet valheim-panel.service \
-    && curl -fsS "http://127.0.0.1:$PANEL_PORT/login" >/dev/null; then
+    && curl -4 -fs "http://127.0.0.1:$PANEL_PORT/login" >/dev/null 2>&1; then
     panel_ready=1
     break
   fi
   sleep 1
 done
-((panel_ready == 1)) || die "The admin panel did not pass its HTTP health check. Run: journalctl -u valheim-panel"
-systemctl is-active --quiet valheim.service || die "The Valheim server did not start. Run: journalctl -u valheim"
+if ((panel_ready == 0)); then
+  systemctl status valheim-panel.service --no-pager >&2 || true
+  journalctl -u valheim-panel.service -n 30 --no-pager >&2 || true
+  die "The admin panel did not pass its HTTP health check."
+fi
+if ! systemctl is-active --quiet valheim.service; then
+  systemctl status valheim.service --no-pager >&2 || true
+  journalctl -u valheim.service -n 30 --no-pager >&2 || true
+  die "The Valheim server did not start."
+fi
 
 host_ip=$(hostname -I | awk '{print $1}')
 if ((PANEL_CONFIG_CREATED == 1)); then

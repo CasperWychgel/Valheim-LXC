@@ -6,33 +6,49 @@
     if (meter) meter.value = Math.min(100, Math.max(0, Number(value) || 0));
   };
 
-  document.querySelectorAll("[data-copy]").forEach((button) => {
-    button.addEventListener("click", async () => {
-      try {
-        await navigator.clipboard.writeText(button.dataset.copy);
-        const original = button.textContent;
-        button.textContent = "Copied";
-        window.setTimeout(() => { button.textContent = original; }, 1400);
-      } catch (_) {
-        button.textContent = "Copy failed";
-      }
-    });
+  const copyText = async (value) => {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(value);
+      return;
+    }
+    const temporary = document.createElement("textarea");
+    temporary.value = value;
+    temporary.setAttribute("readonly", "");
+    temporary.className = "copy-fallback";
+    document.body.append(temporary);
+    temporary.select();
+    const copied = document.execCommand("copy");
+    temporary.remove();
+    if (!copied) throw new Error("Copy failed");
+  };
+
+  document.addEventListener("click", async (event) => {
+    const button = event.target.closest("[data-copy]");
+    if (!button) return;
+    const original = button.textContent;
+    try {
+      await copyText(button.dataset.copy || "");
+      button.textContent = "Copied";
+    } catch (_) {
+      button.textContent = "Copy failed";
+    }
+    window.setTimeout(() => { button.textContent = original; }, 1400);
   });
 
-  document.querySelectorAll("form[data-confirm]").forEach((form) => {
-    form.addEventListener("submit", (event) => {
-      if (!window.confirm(form.dataset.confirm)) event.preventDefault();
-    });
-  });
-
-  document.querySelectorAll("form[data-busy]").forEach((form) => {
-    form.addEventListener("submit", () => {
+  document.addEventListener("submit", (event) => {
+    const form = event.target;
+    if (!(form instanceof HTMLFormElement)) return;
+    if (form.dataset.confirm && !window.confirm(form.dataset.confirm)) {
+      event.preventDefault();
+      return;
+    }
+    if (form.dataset.busy) {
       const button = form.querySelector("button[type='submit']");
       if (button) {
         button.disabled = true;
         button.textContent = form.dataset.busy;
       }
-    });
+    }
   });
 
   const updateStatus = async () => {
@@ -70,5 +86,136 @@
     }
   };
 
+  const updatePublicStatus = async () => {
+    if (!document.querySelector("[data-public-status]")) return;
+    try {
+      const response = await fetch("/api/public-status", {
+        headers: {"Accept": "application/json"},
+        cache: "no-store",
+      });
+      if (!response.ok) return;
+      const data = await response.json();
+      const serverName = document.querySelector("[data-public-server-name]");
+      const state = document.querySelector("[data-public-state]");
+      const count = document.querySelector("[data-public-player-count]");
+      const dot = document.querySelector("[data-public-status-dot]");
+      if (serverName) serverName.textContent = data.server_name;
+      if (state) state.textContent = data.state;
+      if (count) count.textContent = `${data.player_count} / ${data.max_players} Players`;
+      if (dot) {
+        dot.classList.toggle("online", data.active);
+        dot.classList.toggle("offline", !data.active);
+      }
+      const list = document.querySelector("[data-public-player-list]");
+      if (list) {
+        list.replaceChildren();
+        if (data.players.length) {
+          data.players.forEach((name) => {
+            const badge = document.createElement("b");
+            badge.textContent = name;
+            list.append(badge);
+          });
+        } else {
+          const empty = document.createElement("em");
+          empty.textContent = "No players online";
+          list.append(empty);
+        }
+      }
+    } catch (_) {
+      // Keep the most recently rendered server snapshot until the next retry.
+    }
+  };
+
+  const element = (tag, className, value) => {
+    const node = document.createElement(tag);
+    if (className) node.className = className;
+    if (value !== undefined) node.textContent = value;
+    return node;
+  };
+
+  const renderPlayers = (data) => {
+    const list = document.querySelector("[data-player-list]");
+    if (!list) return;
+    list.querySelectorAll("[data-player-row]").forEach((row) => row.remove());
+    const empty = list.querySelector("[data-player-empty]");
+    if (empty) empty.classList.toggle("hidden", data.players.length > 0);
+
+    data.players.forEach((player) => {
+      const row = element("div", "table-row");
+      row.dataset.playerRow = "";
+
+      const identity = element("span");
+      identity.append(element("strong", "", player.name));
+      identity.append(element("small", "", `${player.connection_count} connection${player.connection_count === 1 ? "" : "s"}`));
+      row.append(identity);
+
+      const identifier = element("span");
+      identifier.append(element("code", "", player.platform_id));
+      row.append(identifier);
+
+      const status = element("span");
+      status.append(element("span", `status-label ${player.online ? "online" : "offline"}`, player.status));
+      if (player.online) status.append(element("small", "", player.connected));
+      row.append(status);
+
+      row.append(element("span", "", player.last_connection));
+      const access = element("span");
+      access.append(element("span", `role-label ${player.role.toLowerCase()}`, player.role));
+      row.append(access);
+
+      const actions = element("span", "table-actions player-actions");
+      const copyId = element("button", "text-button", "Copy ID");
+      copyId.type = "button";
+      copyId.dataset.copy = player.platform_id;
+      actions.append(copyId);
+      const copyKick = element("button", "text-button", "Copy kick command");
+      copyKick.type = "button";
+      copyKick.dataset.copy = `kick ${player.name}`;
+      actions.append(copyKick);
+
+      const banForm = document.createElement("form");
+      banForm.method = "post";
+      banForm.action = `/player/${encodeURIComponent(player.platform_id)}/ban`;
+      banForm.dataset.confirm = `${player.banned ? "Remove the ban for" : "Ban"} ${player.name}?`;
+      const csrf = document.createElement("input");
+      csrf.type = "hidden";
+      csrf.name = "csrf_token";
+      csrf.value = list.dataset.csrf || "";
+      banForm.append(csrf);
+      const action = document.createElement("input");
+      action.type = "hidden";
+      action.name = "action";
+      action.value = player.banned ? "unban" : "ban";
+      banForm.append(action);
+      const banButton = element("button", `text-button${player.banned ? "" : " danger"}`, player.banned ? "Unban" : "Ban");
+      banButton.type = "submit";
+      banForm.append(banButton);
+      actions.append(banForm);
+      row.append(actions);
+      list.insertBefore(row, empty || null);
+    });
+
+    const count = document.querySelector("[data-player-count]");
+    const known = document.querySelector("[data-known-player-count]");
+    if (count) count.textContent = `${data.player_count} / ${data.max_players}`;
+    if (known) known.textContent = data.players.length;
+  };
+
+  const updatePlayers = async () => {
+    if (!document.querySelector("[data-player-list]")) return;
+    try {
+      const response = await fetch("/api/players", {headers: {"Accept": "application/json"}});
+      if (!response.ok) return;
+      renderPlayers(await response.json());
+    } catch (_) {
+      // The current table remains useful if a transient refresh fails.
+    }
+  };
+
+  updateStatus();
+  updatePublicStatus();
+  updatePlayers();
   window.setInterval(updateStatus, 5000);
+  window.setInterval(updatePublicStatus, 10000);
+  window.setInterval(updatePlayers, 10000);
 })();

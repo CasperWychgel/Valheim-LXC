@@ -7,11 +7,27 @@
   <meta name="description" content="Secure local administration for a Valheim dedicated server.">
   <title>Sign in · Valheim Admin</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+  <script src="{{ url_for('static', filename='app.js') }}" defer></script>
 </head>
 <body class="login-body">
   <main class="login-shell">
     <section class="login-story" aria-labelledby="welcome-title">
       <div class="brand-mark large" aria-hidden="true">V</div>
+      <section class="login-server-overview" data-public-status aria-label="Current server information">
+        <div class="login-server-grid">
+          <article><span>Server name</span><strong data-public-server-name>{{ public_status.server_name }}</strong></article>
+          <article><span>Status</span><strong class="public-state"><i class="status-dot {{ 'online' if public_status.active else 'offline' }}" data-public-status-dot></i><b data-public-state>{{ public_status.state }}</b></strong></article>
+          <article><span>Players</span><strong data-public-player-count>{{ public_status.player_count }} / {{ public_status.max_players }} Players</strong></article>
+        </div>
+        {% if public_status.show_player_names %}
+          <div class="public-player-names">
+            <span>Online players</span>
+            <div data-public-player-list>
+              {% for player_name in public_status.players %}<b>{{ player_name }}</b>{% else %}<em>No players online</em>{% endfor %}
+            </div>
+          </div>
+        {% endif %}
+      </section>
       <p class="eyebrow">Dedicated server control</p>
       <h1 id="welcome-title">Keep the realm steady.</h1>
       <p class="login-intro">A focused control room for your Valheim world, running privately inside your Debian container.</p>

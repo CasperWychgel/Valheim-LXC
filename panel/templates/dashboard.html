@@ -18,12 +18,13 @@
       </a>
       <nav class="nav" aria-label="Primary navigation">
         <a class="{{ 'active' if tab == 'overview' }}" href="{{ url_for('dashboard', tab='overview') }}"><span>01</span>Overview</a>
-        <a class="{{ 'active' if tab == 'settings' }}" href="{{ url_for('dashboard', tab='settings') }}"><span>02</span>Settings</a>
-        <a class="{{ 'active' if tab == 'access' }}" href="{{ url_for('dashboard', tab='access') }}"><span>03</span>Access</a>
-        <a class="{{ 'active' if tab == 'worlds' }}" href="{{ url_for('dashboard', tab='worlds') }}"><span>04</span>Worlds</a>
-        <a class="{{ 'active' if tab == 'backups' }}" href="{{ url_for('dashboard', tab='backups') }}"><span>05</span>Backups</a>
-        <a class="{{ 'active' if tab == 'logs' }}" href="{{ url_for('dashboard', tab='logs') }}"><span>06</span>Logs</a>
-        <a class="{{ 'active' if tab == 'security' }}" href="{{ url_for('dashboard', tab='security') }}"><span>07</span>Security</a>
+        <a class="{{ 'active' if tab == 'players' }}" href="{{ url_for('dashboard', tab='players') }}"><span>02</span>Players</a>
+        <a class="{{ 'active' if tab == 'settings' }}" href="{{ url_for('dashboard', tab='settings') }}"><span>03</span>Settings</a>
+        <a class="{{ 'active' if tab == 'access' }}" href="{{ url_for('dashboard', tab='access') }}"><span>04</span>Access</a>
+        <a class="{{ 'active' if tab == 'worlds' }}" href="{{ url_for('dashboard', tab='worlds') }}"><span>05</span>Worlds</a>
+        <a class="{{ 'active' if tab == 'backups' }}" href="{{ url_for('dashboard', tab='backups') }}"><span>06</span>Backups</a>
+        <a class="{{ 'active' if tab == 'logs' }}" href="{{ url_for('dashboard', tab='logs') }}"><span>07</span>Logs</a>
+        <a class="{{ 'active' if tab == 'security' }}" href="{{ url_for('dashboard', tab='security') }}"><span>08</span>Security</a>
       </nav>
       <div class="sidebar-footer">
         <div class="mini-status">
@@ -41,7 +42,7 @@
       <header class="topbar">
         <div>
           <p class="eyebrow">Valheim Dedicated Server</p>
-          <h1>{{ {'overview':'Overview','settings':'Server settings','access':'Access control','worlds':'World library','backups':'Backup vault','logs':'Service logs','security':'Panel security'}[tab] }}</h1>
+          <h1>{{ {'overview':'Overview','players':'Player activity','settings':'Server settings','access':'Access control','worlds':'World library','backups':'Backup vault','logs':'Service logs','security':'Panel security'}[tab] }}</h1>
         </div>
         <div class="topbar-status">
           <span class="status-dot {{ 'online' if status.active else 'offline' }}" data-status-dot></span>
@@ -115,6 +116,44 @@
               <p>Forward UDP {{ settings.GAME_PORT }}–{{ settings.GAME_PORT|int + 1 }} to this container for Internet players. Keep the admin panel private.</p>
             {% endif %}
           </article>
+        </section>
+
+      {% elif tab == 'players' %}
+        <section class="metric-grid player-metrics" aria-label="Player summary">
+          <article class="metric-card"><span>Online now</span><strong data-player-count>{{ status.player_count }} / {{ status.max_players }}</strong><small>Connected players</small></article>
+          <article class="metric-card"><span>Known players</span><strong data-known-player-count>{{ players|length }}</strong><small>Recorded in local history</small></article>
+          <article class="metric-card"><span>Server capacity</span><strong>{{ status.max_players }}</strong><small>Vanilla Valheim limit</small></article>
+          <article class="metric-card build"><span>Activity source</span><strong>Live log</strong><small>Updated every 10 seconds</small></article>
+        </section>
+
+        <section class="panel-card table-card player-activity-card">
+          <div class="card-heading">
+            <div><p class="eyebrow">Connections & access</p><h2>Player activity</h2></div>
+            <a class="button" href="{{ url_for('dashboard', tab='players') }}">Refresh</a>
+          </div>
+          <p class="player-help">Player identities are derived from Valheim's own connection log. Use <strong>Copy kick command</strong> in the in-game F5 admin console. Banning prevents the selected ID from reconnecting.</p>
+          <div class="data-table player-table" data-player-list data-csrf="{{ csrf_token }}">
+            <div class="table-row table-head"><span>Player</span><span>Game ID</span><span>Status</span><span>Last connection</span><span>Access</span><span>Actions</span></div>
+            {% for player in players %}
+              <div class="table-row" data-player-row>
+                <span><strong>{{ player.name }}</strong><small>{{ player.connection_count }} connection{{ '' if player.connection_count == 1 else 's' }}</small></span>
+                <span><code>{{ player.platform_id }}</code></span>
+                <span><span class="status-label {{ 'online' if player.online else 'offline' }}">{{ player.status }}</span>{% if player.online %}<small>{{ player.connected }}</small>{% endif %}</span>
+                <span>{{ player.last_connection }}</span>
+                <span><span class="role-label {{ player.role|lower }}">{{ player.role }}</span></span>
+                <span class="table-actions player-actions">
+                  <button class="text-button" type="button" data-copy="{{ player.platform_id }}">Copy ID</button>
+                  <button class="text-button" type="button" data-copy="kick {{ player.name }}">Copy kick command</button>
+                  <form method="post" action="{{ url_for('player_ban', platform_id=player.platform_id) }}" data-confirm="{{ 'Remove the ban for' if player.banned else 'Ban' }} {{ player.name }}?">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                    <input type="hidden" name="action" value="{{ 'unban' if player.banned else 'ban' }}">
+                    <button class="text-button {{ '' if player.banned else 'danger' }}" type="submit">{{ 'Unban' if player.banned else 'Ban' }}</button>
+                  </form>
+                </span>
+              </div>
+            {% endfor %}
+            <div class="empty-state {{ 'hidden' if players }}" data-player-empty><strong>No players recorded yet</strong><p>Players appear after their first complete connection to this server.</p></div>
+          </div>
         </section>
 
       {% elif tab == 'settings' %}
@@ -244,7 +283,13 @@
             <label><span>Confirm new password</span><input type="password" name="confirm_password" autocomplete="new-password" minlength="12" required></label>
             <button class="button primary" type="submit">Change password</button>
           </form>
-          <article class="panel-card security-note">
+          <form method="post" action="{{ url_for('security_privacy') }}" class="panel-card form-stack">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <div><p class="eyebrow">Sign-in page</p><h2>Player name visibility</h2><p>The public sign-in overview can show active player names. It never exposes player IDs, roles, timestamps, or history.</p></div>
+            <label class="toggle"><input type="checkbox" name="show_player_names_on_login" value="1" {{ 'checked' if panel_config.show_player_names_on_login }}><span></span><b>Show active player names<small>Disable this for maximum privacy.</small></b></label>
+            <button class="button primary" type="submit">Save privacy setting</button>
+          </form>
+          <article class="panel-card security-note security-wide">
             <p class="eyebrow">Deployment boundary</p><h2>Keep this control plane private</h2>
             <p>The panel can restart the game, replace worlds, and restore archives. It is intended for your trusted network.</p>
             <ul><li>Prefer a VPN for remote administration.</li><li>Do not port-forward TCP {{ panel_port }}.</li><li>Keep Debian and Valheim updates enabled.</li></ul>

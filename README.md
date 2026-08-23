@@ -28,9 +28,9 @@ The English-only base can be adapted for other SteamCMD game servers.
 - A responsive local admin panel on TCP 2460 by default.
 
 The panel provides server start/stop/restart/update actions, live container
-metrics, server settings and world modifiers, access lists, world upload and
-selection, backup download/restore/delete, service logs, and a password-change
-screen.
+metrics, player activity and connection history, server settings and world
+modifiers, access lists, world upload and selection, backup
+download/restore/delete, service logs, and security controls.
 
 ## Recommended resources
 
@@ -149,6 +149,22 @@ Optional environment variables include `SERVER_NAME`, `WORLD_NAME`,
 Open `http://CONTAINER_IP:2460`. Use the generated credentials printed by the
 installer, then change the panel password under **Security**.
 
+Before sign-in, the public server overview shows the server name, status,
+current `players / 10` count, and only the names of players who are online.
+Game IDs, roles, connection times, and history remain behind authentication.
+Active player names can be hidden completely under **Security → Player name
+visibility**.
+
+The authenticated **Players** page reads Valheim's local connection log and
+keeps a small local history database. It displays the player name, platform ID,
+online state, last connection, connection count, and current access role. The
+page can copy an ID or an in-game `kick PLAYERNAME` command and can add or remove
+the player ID from Valheim's ban list. Vanilla Valheim has no remote RCON
+interface, so a copied kick command must be entered by an administrator in the
+in-game F5 console. Character levels and active Forsaken powers are not exposed
+in the dedicated-server connection log and therefore are intentionally not
+invented by the panel.
+
 The panel is a control plane: it can replace world files and stop the game.
 Keep it on a trusted LAN or access it through a VPN. Do not forward its TCP port
 directly from the Internet.
@@ -230,6 +246,7 @@ Important paths:
 /opt/valheim/backups/           Portable .tar.gz archives (30 retained)
 /opt/valheim/logs/              SteamCMD and Valheim file logs
 /opt/valheim/panel/             English admin panel
+/var/lib/valheim-panel/         Local player activity database
 /etc/valheim/server.env         Server launch settings
 /etc/valheim/panel.json         Hashed panel credentials and session secret
 ```

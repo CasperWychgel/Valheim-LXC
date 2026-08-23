@@ -17,6 +17,7 @@ import re
 import secrets
 import shlex
 import shutil
+import sqlite3
 import subprocess
 import tempfile
 import time
@@ -46,6 +47,10 @@ VALHEIM_HOME = Path(os.environ.get("VALHEIM_HOME", "/opt/valheim"))
 DATA_DIR = Path(os.environ.get("VALHEIM_DATA_DIR", str(VALHEIM_HOME / "data")))
 WORLD_DIR = Path(os.environ.get("VALHEIM_WORLD_DIR", str(DATA_DIR / "worlds_local")))
 BACKUP_DIR = Path(os.environ.get("VALHEIM_BACKUP_DIR", str(VALHEIM_HOME / "backups")))
+VALHEIM_LOG = Path(os.environ.get("VALHEIM_LOG", str(VALHEIM_HOME / "logs" / "valheim.log")))
+PLAYER_DB = Path(
+    os.environ.get("VALHEIM_PLAYER_DB", "/var/lib/valheim-panel/players.sqlite3")
+)
 MANIFEST = Path(
     os.environ.get(
         "VALHEIM_MANIFEST",
@@ -63,6 +68,13 @@ ACCESS_FILES = {
 WORLD_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._-]{0,63}$")
 BACKUP_NAME_RE = re.compile(r"^valheim-[0-9]{8}T[0-9]{6}Z\.tar\.gz$")
 PLATFORM_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_:-]{1,127}$")
+LOG_TIMESTAMP_RE = re.compile(r"^(?P<timestamp>\d{2}/\d{2}/\d{4} \d{2}:\d{2}:\d{2}):\s*(?P<message>.*)$")
+HANDSHAKE_RE = re.compile(r"Got handshake from client\s+(?P<identifier>[A-Za-z0-9_:-]+)")
+CHARACTER_RE = re.compile(
+    r"Got character ZDOID from\s+(?P<name>.+?)\s*:\s*(?P<zdo>[0-9]+:[0-9]+)"
+)
+CLOSING_SOCKET_RE = re.compile(r"Closing socket\s+(?P<identifier>[A-Za-z0-9_:-]+)")
+MAX_PLAYERS = 10
 
 DEFAULT_SETTINGS = {
     "SERVER_NAME": "Valheim Dedicated Server",
@@ -97,8 +109,10 @@ MODIFIER_CHOICES = {
 }
 
 
-def read_panel_config() -> dict[str, str]:
-    return json.loads(PANEL_CONFIG.read_text(encoding="utf-8"))
+def read_panel_config() -> dict[str, Any]:
+    config = json.loads(PANEL_CONFIG.read_text(encoding="utf-8"))
+    config.setdefault("show_player_names_on_login", True)
+    return config
 
 
 def password_hash(password: str, *, iterations: int = 390_000) -> str:
@@ -265,6 +279,7 @@ def status_payload() -> dict[str, Any]:
     memory = psutil.virtual_memory()
     disk = psutil.disk_usage(str(VALHEIM_HOME if VALHEIM_HOME.exists() else Path("/")))
     settings = read_settings()
+    players = list_players()
     return {
         "active": service_active(),
         "state": "Online" if service_active() else "Offline",
@@ -278,6 +293,8 @@ def status_payload() -> dict[str, Any]:
         "address": local_address(),
         "game_port": settings["GAME_PORT"],
         "world": settings["WORLD_NAME"],
+        "player_count": sum(1 for player in players if player["online"]),
+        "max_players": MAX_PLAYERS,
     }
 
 
@@ -299,6 +316,314 @@ def relative_time(timestamp: float) -> str:
     if delta < 86_400:
         return f"{delta // 3600} h ago"
     return f"{delta // 86_400} d ago"
+
+
+def player_database() -> sqlite3.Connection:
+    PLAYER_DB.parent.mkdir(parents=True, exist_ok=True)
+    connection = sqlite3.connect(PLAYER_DB, timeout=5)
+    connection.row_factory = sqlite3.Row
+    connection.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS players (
+            platform_id TEXT PRIMARY KEY,
+            raw_id TEXT NOT NULL UNIQUE,
+            name TEXT NOT NULL,
+            first_seen REAL NOT NULL,
+            last_seen REAL NOT NULL,
+            connected_at REAL,
+            disconnected_at REAL,
+            online INTEGER NOT NULL DEFAULT 0,
+            connection_count INTEGER NOT NULL DEFAULT 1
+        );
+        CREATE TABLE IF NOT EXISTS pending_connections (
+            raw_id TEXT PRIMARY KEY,
+            connected_at REAL NOT NULL,
+            counted INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE IF NOT EXISTS tracker_meta (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );
+        """
+    )
+    try:
+        os.chmod(PLAYER_DB, 0o640)
+    except OSError:
+        pass
+    return connection
+
+
+def tracker_meta(connection: sqlite3.Connection, key: str, default: str = "") -> str:
+    row = connection.execute("SELECT value FROM tracker_meta WHERE key = ?", (key,)).fetchone()
+    return str(row["value"]) if row else default
+
+
+def set_tracker_meta(connection: sqlite3.Connection, key: str, value: str) -> None:
+    connection.execute(
+        "INSERT INTO tracker_meta (key, value) VALUES (?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        (key, value),
+    )
+
+
+def service_instance_token() -> str:
+    if not service_active():
+        return "offline"
+    completed = run(
+        ["systemctl", "show", "valheim.service", "--property=InvocationID", "--value"]
+    )
+    return completed.stdout.strip() or "active"
+
+
+def event_timestamp(raw_line: str) -> tuple[float, str]:
+    match = LOG_TIMESTAMP_RE.match(raw_line.strip())
+    if not match:
+        return time.time(), raw_line.strip()
+    try:
+        parsed = datetime.strptime(match.group("timestamp"), "%m/%d/%Y %H:%M:%S")
+        return parsed.timestamp(), match.group("message")
+    except ValueError:
+        return time.time(), match.group("message")
+
+
+def platform_user_id(raw_identifier: str) -> str:
+    identifier = raw_identifier.strip()
+    if identifier.isdigit():
+        return f"Steam_{identifier}"
+    return identifier[:128]
+
+
+def safe_player_name(raw_name: str) -> str:
+    return "".join(character for character in raw_name.strip() if ord(character) >= 32)[:64]
+
+
+def mark_players_offline(connection: sqlite3.Connection, timestamp: float) -> None:
+    connection.execute(
+        "UPDATE players SET online = 0, last_seen = ?, disconnected_at = ? WHERE online = 1",
+        (timestamp, timestamp),
+    )
+    connection.execute("DELETE FROM pending_connections")
+
+
+def parse_player_log_line(connection: sqlite3.Connection, raw_line: str) -> None:
+    timestamp, message = event_timestamp(raw_line)
+    handshake = HANDSHAKE_RE.search(message)
+    if handshake:
+        raw_identifier = handshake.group("identifier")
+        pending = connection.execute(
+            "SELECT 1 FROM pending_connections WHERE raw_id = ?", (raw_identifier,)
+        ).fetchone()
+        if pending:
+            return
+        known = connection.execute(
+            "SELECT platform_id FROM players WHERE raw_id = ?", (raw_identifier,)
+        ).fetchone()
+        counted = 0
+        if known:
+            connection.execute(
+                "UPDATE players SET online = 1, connected_at = ?, disconnected_at = NULL, "
+                "last_seen = ?, connection_count = connection_count + 1 WHERE raw_id = ?",
+                (timestamp, timestamp, raw_identifier),
+            )
+            counted = 1
+        connection.execute(
+            "INSERT OR REPLACE INTO pending_connections (raw_id, connected_at, counted) "
+            "VALUES (?, ?, ?)",
+            (raw_identifier, timestamp, counted),
+        )
+        return
+
+    character = CHARACTER_RE.search(message)
+    if character:
+        name = safe_player_name(character.group("name"))
+        if not name:
+            return
+        pending = connection.execute(
+            "SELECT raw_id, connected_at, counted FROM pending_connections "
+            "ORDER BY connected_at ASC LIMIT 1"
+        ).fetchone()
+        if pending:
+            raw_identifier = str(pending["raw_id"])
+            platform_id = platform_user_id(raw_identifier)
+            existing = connection.execute(
+                "SELECT 1 FROM players WHERE platform_id = ?", (platform_id,)
+            ).fetchone()
+            if existing:
+                increment = 0 if int(pending["counted"]) else 1
+                connection.execute(
+                    "UPDATE players SET raw_id = ?, name = ?, online = 1, connected_at = ?, "
+                    "disconnected_at = NULL, last_seen = ?, "
+                    "connection_count = connection_count + ? WHERE platform_id = ?",
+                    (
+                        raw_identifier,
+                        name,
+                        float(pending["connected_at"]),
+                        timestamp,
+                        increment,
+                        platform_id,
+                    ),
+                )
+            else:
+                connection.execute(
+                    "INSERT INTO players (platform_id, raw_id, name, first_seen, last_seen, "
+                    "connected_at, disconnected_at, online, connection_count) "
+                    "VALUES (?, ?, ?, ?, ?, ?, NULL, 1, 1)",
+                    (
+                        platform_id,
+                        raw_identifier,
+                        name,
+                        float(pending["connected_at"]),
+                        timestamp,
+                        float(pending["connected_at"]),
+                    ),
+                )
+            connection.execute(
+                "DELETE FROM pending_connections WHERE raw_id = ?", (raw_identifier,)
+            )
+        else:
+            connection.execute(
+                "UPDATE players SET last_seen = ? WHERE name = ? AND online = 1",
+                (timestamp, name),
+            )
+        return
+
+    closing = CLOSING_SOCKET_RE.search(message)
+    if closing:
+        raw_identifier = closing.group("identifier")
+        connection.execute(
+            "UPDATE players SET online = 0, last_seen = ?, disconnected_at = ? WHERE raw_id = ?",
+            (timestamp, timestamp, raw_identifier),
+        )
+        connection.execute(
+            "DELETE FROM pending_connections WHERE raw_id = ?", (raw_identifier,)
+        )
+
+
+def sync_player_history() -> None:
+    connection = player_database()
+    now = time.time()
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        instance_token = service_instance_token()
+        previous_instance = tracker_meta(connection, "service_instance")
+        if previous_instance and previous_instance != instance_token:
+            mark_players_offline(connection, now)
+        set_tracker_meta(connection, "service_instance", instance_token)
+
+        if instance_token == "offline":
+            mark_players_offline(connection, now)
+            connection.commit()
+            return
+        if not VALHEIM_LOG.is_file():
+            connection.commit()
+            return
+
+        stat = VALHEIM_LOG.stat()
+        signature = f"{stat.st_dev}:{stat.st_ino}"
+        previous_signature = tracker_meta(connection, "log_signature")
+        try:
+            offset = int(tracker_meta(connection, "log_offset", "0"))
+        except ValueError:
+            offset = 0
+        if previous_signature and (previous_signature != signature or stat.st_size < offset):
+            mark_players_offline(connection, now)
+            offset = 0
+
+        with VALHEIM_LOG.open("rb") as handle:
+            handle.seek(offset)
+            content = handle.read()
+        consumed = len(content)
+        if content and not content.endswith(b"\n"):
+            final_newline = content.rfind(b"\n")
+            if final_newline < 0:
+                consumed = 0
+                content = b""
+            else:
+                consumed = final_newline + 1
+                content = content[:consumed]
+        for raw_line in content.decode("utf-8", errors="replace").splitlines():
+            parse_player_log_line(connection, raw_line)
+
+        set_tracker_meta(connection, "log_signature", signature)
+        set_tracker_meta(connection, "log_offset", str(offset + consumed))
+        connection.execute(
+            "DELETE FROM pending_connections WHERE connected_at < ?", (now - 600,)
+        )
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
+
+
+def access_entry_set(name: str) -> set[str]:
+    return {
+        line.strip()
+        for line in read_access(name).splitlines()
+        if line.strip() and not line.lstrip().startswith("//")
+    }
+
+
+def list_players() -> list[dict[str, Any]]:
+    try:
+        sync_player_history()
+        connection = player_database()
+        try:
+            rows = connection.execute(
+                "SELECT * FROM players ORDER BY online DESC, last_seen DESC, name COLLATE NOCASE"
+            ).fetchall()
+        finally:
+            connection.close()
+    except (OSError, sqlite3.Error, subprocess.SubprocessError, ValueError):
+        return []
+
+    admins = access_entry_set("admins")
+    bans = access_entry_set("bans")
+    allowed = access_entry_set("allowlist")
+    players: list[dict[str, Any]] = []
+    for row in rows:
+        platform_id = str(row["platform_id"])
+        online = bool(row["online"])
+        if platform_id in bans:
+            role = "Banned"
+        elif platform_id in admins:
+            role = "Admin"
+        elif platform_id in allowed:
+            role = "Allowed"
+        else:
+            role = "Player"
+        last_timestamp = float(row["disconnected_at"] or row["last_seen"])
+        players.append(
+            {
+                "name": str(row["name"]),
+                "platform_id": platform_id,
+                "online": online,
+                "status": "Online" if online else "Offline",
+                "connected": relative_time(float(row["connected_at"])) if online else "—",
+                "last_connection": "Online" if online else relative_time(last_timestamp),
+                "connection_count": int(row["connection_count"]),
+                "role": role,
+                "banned": platform_id in bans,
+            }
+        )
+    return players
+
+
+def public_server_status() -> dict[str, Any]:
+    settings = read_settings()
+    active = service_active()
+    online_players = [player for player in list_players() if player["online"]] if active else []
+    show_names = bool(read_panel_config().get("show_player_names_on_login", True))
+    return {
+        "server_name": settings["SERVER_NAME"],
+        "active": active,
+        "state": "Online" if active else "Offline",
+        "player_count": len(online_players),
+        "max_players": MAX_PLAYERS,
+        "players": [player["name"] for player in online_players] if show_names else [],
+        "show_player_names": show_names,
+    }
 
 
 def list_worlds() -> list[dict[str, Any]]:
@@ -363,6 +688,17 @@ def validate_access(content: str) -> str:
     return "\n".join(lines) + "\n"
 
 
+def set_player_banned(platform_id: str, banned: bool) -> None:
+    if not PLATFORM_ID_RE.fullmatch(platform_id):
+        raise ValueError("Invalid platform user ID.")
+    lines = read_access("bans").replace("\r\n", "\n").splitlines()
+    updated = [line for line in lines if line.strip() != platform_id]
+    if banned:
+        updated.append(platform_id)
+    content = "\n".join(updated).rstrip() + "\n"
+    atomic_text_write(DATA_DIR / ACCESS_FILES["bans"], content)
+
+
 def create_app() -> Flask:
     config = read_panel_config()
     application = Flask(
@@ -423,7 +759,14 @@ def create_app() -> Flask:
             now = time.time()
             attempts = [value for value in login_attempts.get(client, []) if now - value < 300]
             if len(attempts) >= 8:
-                return render_template("login.html", error="Too many attempts. Try again in five minutes."), 429
+                return (
+                    render_template(
+                        "login.html",
+                        error="Too many attempts. Try again in five minutes.",
+                        public_status=public_server_status(),
+                    ),
+                    429,
+                )
             panel_config = read_panel_config()
             username_ok = hmac.compare_digest(request.form.get("username", ""), panel_config["username"])
             password_ok = password_matches(request.form.get("password", ""), panel_config["password_hash"])
@@ -436,10 +779,25 @@ def create_app() -> Flask:
                 return redirect(url_for("dashboard"))
             attempts.append(now)
             login_attempts[client] = attempts
-            return render_template("login.html", error="Incorrect username or password."), 401
+            return (
+                render_template(
+                    "login.html",
+                    error="Incorrect username or password.",
+                    public_status=public_server_status(),
+                ),
+                401,
+            )
         if session.get("authenticated"):
             return redirect(url_for("dashboard"))
-        return render_template("login.html", error=None)
+        return render_template(
+            "login.html", error=None, public_status=public_server_status()
+        )
+
+    @application.get("/api/public-status")
+    def api_public_status():
+        response = jsonify(public_server_status())
+        response.headers["Cache-Control"] = "no-store"
+        return response
 
     @application.post("/logout")
     @login_required
@@ -451,7 +809,16 @@ def create_app() -> Flask:
     @login_required
     def dashboard():
         tab = request.args.get("tab", "overview")
-        if tab not in {"overview", "settings", "access", "worlds", "backups", "logs", "security"}:
+        if tab not in {
+            "overview",
+            "players",
+            "settings",
+            "access",
+            "worlds",
+            "backups",
+            "logs",
+            "security",
+        }:
             tab = "overview"
         logs = ""
         if tab == "logs":
@@ -464,6 +831,8 @@ def create_app() -> Flask:
             tab=tab,
             status=status_payload(),
             settings=read_settings(),
+            players=list_players() if tab == "players" else [],
+            panel_config=read_panel_config(),
             preset_choices=PRESET_CHOICES,
             modifier_choices=MODIFIER_CHOICES,
             access={key: read_access(key) for key in ACCESS_FILES} if tab == "access" else {},
@@ -477,6 +846,34 @@ def create_app() -> Flask:
     @login_required
     def api_status():
         return jsonify(status_payload())
+
+    @application.get("/api/players")
+    @login_required
+    def api_players():
+        players = list_players()
+        return jsonify(
+            {
+                "players": players,
+                "player_count": sum(1 for player in players if player["online"]),
+                "max_players": MAX_PLAYERS,
+            }
+        )
+
+    @application.post("/player/<platform_id>/ban")
+    @login_required
+    def player_ban(platform_id: str):
+        action_name = request.form.get("action", "")
+        if action_name not in {"ban", "unban"}:
+            abort(400, "Unknown player action.")
+        try:
+            set_player_banned(platform_id, action_name == "ban")
+            flash(
+                f"{platform_id} {'banned' if action_name == 'ban' else 'unbanned'}.",
+                "success",
+            )
+        except (ValueError, OSError) as error:
+            flash(str(error), "error")
+        return redirect(url_for("dashboard", tab="players"))
 
     @application.post("/action/<action>")
     @login_required
@@ -633,6 +1030,22 @@ def create_app() -> Flask:
             panel_config["password_hash"] = password_hash(new)
             atomic_text_write(PANEL_CONFIG, json.dumps(panel_config, indent=2) + "\n", mode=0o600)
             flash("Panel password changed.", "success")
+        return redirect(url_for("dashboard", tab="security"))
+
+    @application.post("/security/privacy")
+    @login_required
+    def security_privacy():
+        panel_config = read_panel_config()
+        panel_config["show_player_names_on_login"] = (
+            request.form.get("show_player_names_on_login") == "1"
+        )
+        try:
+            atomic_text_write(
+                PANEL_CONFIG, json.dumps(panel_config, indent=2) + "\n", mode=0o600
+            )
+            flash("Sign-in page privacy setting saved.", "success")
+        except OSError as error:
+            flash(str(error), "error")
         return redirect(url_for("dashboard", tab="security"))
 
     return application

@@ -19,6 +19,7 @@ class PanelIntegrationTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.temporary = tempfile.TemporaryDirectory()
         root = Path(cls.temporary.name)
+        cls.root = root
         cls.data = root / "data"
         cls.worlds = cls.data / "worlds_local"
         cls.backups = root / "backups"
@@ -28,35 +29,33 @@ class PanelIntegrationTests(unittest.TestCase):
 
         cls.panel_config = root / "panel.json"
         cls.server_config = root / "server.env"
+        cls.player_log = root / "logs" / "valheim.log"
+        cls.player_log.parent.mkdir(parents=True)
+        cls.player_db = root / "players.sqlite3"
         password = "Correct-Horse-42"
         iterations = 10_000
         salt = bytes.fromhex("00112233445566778899aabbccddeeff")
         digest = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, iterations)
         cls.password = password
-        cls.panel_config.write_text(
-            json.dumps(
-                {
-                    "username": "admin",
-                    "password_hash": f"pbkdf2_sha256${iterations}${salt.hex()}${digest.hex()}",
-                    "session_secret": "test-session-secret-that-is-long-enough",
-                }
-            ),
-            encoding="utf-8",
-        )
-        cls.server_config.write_text(
-            '\n'.join(
-                [
-                    'SERVER_NAME="Test Realm"',
-                    'WORLD_NAME="Dedicated"',
-                    'SERVER_PASSWORD="TestPass"',
-                    'GAME_PORT="2456"',
-                    'PUBLIC="0"',
-                    'CROSSPLAY="0"',
-                ]
-            )
-            + "\n",
-            encoding="utf-8",
-        )
+        cls.panel_payload = {
+            "username": "admin",
+            "password_hash": f"pbkdf2_sha256${iterations}${salt.hex()}${digest.hex()}",
+            "session_secret": "test-session-secret-that-is-long-enough",
+            "show_player_names_on_login": True,
+        }
+        cls.panel_config.write_text(json.dumps(cls.panel_payload), encoding="utf-8")
+        cls.server_text = '\n'.join(
+            [
+                'SERVER_NAME="Test Realm"',
+                'WORLD_NAME="Dedicated"',
+                'SERVER_PASSWORD="TestPass"',
+                'GAME_PORT="2456"',
+                'PUBLIC="0"',
+                'CROSSPLAY="0"',
+            ]
+        ) + "\n"
+        cls.server_config.write_text(cls.server_text, encoding="utf-8")
+        cls.player_log.write_text("", encoding="utf-8")
         for filename in ("adminlist.txt", "bannedlist.txt", "permittedlist.txt"):
             (cls.data / filename).write_text("// Test file\n", encoding="utf-8")
         (cls.server / "steamapps" / "appmanifest_896660.acf").write_text(
@@ -72,6 +71,8 @@ class PanelIntegrationTests(unittest.TestCase):
                 "VALHEIM_WORLD_DIR": str(cls.worlds),
                 "VALHEIM_BACKUP_DIR": str(cls.backups),
                 "VALHEIM_MANIFEST": str(cls.server / "steamapps" / "appmanifest_896660.acf"),
+                "VALHEIM_LOG": str(cls.player_log),
+                "VALHEIM_PLAYER_DB": str(cls.player_db),
                 "VALHEIM_CTL": "/fake/valheimctl",
             }
         )
@@ -84,6 +85,8 @@ class PanelIntegrationTests(unittest.TestCase):
             if command[:3] == ["systemctl", "is-active", "--quiet"]:
                 return subprocess.CompletedProcess(command, 0, "", "")
             if command[:2] == ["systemctl", "show"]:
+                if "--property=InvocationID" in command:
+                    return subprocess.CompletedProcess(command, 0, "test-invocation\n", "")
                 return subprocess.CompletedProcess(command, 0, "Sun 2026-08-23 12:00:00 UTC\n", "")
             if command[:2] == ["hostname", "-I"]:
                 return subprocess.CompletedProcess(command, 0, "192.0.2.20\n", "")
@@ -100,7 +103,34 @@ class PanelIntegrationTests(unittest.TestCase):
         cls.temporary.cleanup()
 
     def setUp(self) -> None:
+        self.panel_config.write_text(json.dumps(self.panel_payload), encoding="utf-8")
+        self.server_config.write_text(self.server_text, encoding="utf-8")
+        self.player_log.write_text("", encoding="utf-8")
+        for database_file in (
+            self.player_db,
+            Path(f"{self.player_db}-wal"),
+            Path(f"{self.player_db}-shm"),
+        ):
+            database_file.unlink(missing_ok=True)
+        for filename in ("adminlist.txt", "bannedlist.txt", "permittedlist.txt"):
+            (self.data / filename).write_text("// Test file\n", encoding="utf-8")
         self.client = self.app.test_client()
+
+    def write_player_log(self, *, disconnected: bool = False) -> None:
+        lines = [
+            "08/23/2026 14:20:57: Got handshake from client 76561197968825983",
+            "08/23/2026 14:21:08: Server: New peer connected,sending global keys",
+            "08/23/2026 14:21:17: Got character ZDOID from TeSt : 614124615:1",
+            "08/23/2026 14:21:22: Got character ZDOID from TeSt : 0:0",
+        ]
+        if disconnected:
+            lines.extend(
+                [
+                    "08/23/2026 14:33:09: RPC_Disconnect",
+                    "08/23/2026 14:33:09: Closing socket 76561197968825983",
+                ]
+            )
+        self.player_log.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
     def login(self) -> None:
         response = self.client.post(
@@ -122,7 +152,7 @@ class PanelIntegrationTests(unittest.TestCase):
 
     def test_all_panel_tabs_render(self) -> None:
         self.login()
-        for tab in ("overview", "settings", "access", "worlds", "backups", "logs", "security"):
+        for tab in ("overview", "players", "settings", "access", "worlds", "backups", "logs", "security"):
             with self.subTest(tab=tab):
                 response = self.client.get(f"/?tab={tab}")
                 self.assertEqual(response.status_code, 200)
@@ -136,6 +166,59 @@ class PanelIntegrationTests(unittest.TestCase):
         self.assertTrue(payload["active"])
         self.assertEqual(payload["build"], "123456")
         self.assertEqual(payload["address"], "192.0.2.20")
+
+    def test_public_summary_shows_active_name_but_not_game_id(self) -> None:
+        self.write_player_log()
+        response = self.client.get("/login")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"Test Realm", response.data)
+        self.assertIn(b"1 / 10 Players", response.data)
+        self.assertIn(b"TeSt", response.data)
+        self.assertNotIn(b"Steam_76561197968825983", response.data)
+
+        payload = self.client.get("/api/public-status").get_json()
+        self.assertEqual(payload["players"], ["TeSt"])
+        self.assertNotIn("platform_id", payload)
+
+    def test_player_activity_tracks_disconnects(self) -> None:
+        self.write_player_log(disconnected=True)
+        players = self.module.list_players()
+        self.assertEqual(len(players), 1)
+        self.assertEqual(players[0]["name"], "TeSt")
+        self.assertEqual(players[0]["platform_id"], "Steam_76561197968825983")
+        self.assertFalse(players[0]["online"])
+
+    def test_authenticated_player_page_and_ban_action(self) -> None:
+        self.write_player_log()
+        self.login()
+        response = self.client.get("/?tab=players")
+        self.assertIn(b"Player activity", response.data)
+        self.assertIn(b"Steam_76561197968825983", response.data)
+
+        response = self.client.post(
+            "/player/Steam_76561197968825983/ban",
+            data={"csrf_token": self.csrf(), "action": "ban"},
+        )
+        self.assertEqual(response.status_code, 302)
+        self.assertIn(
+            "Steam_76561197968825983",
+            (self.data / "bannedlist.txt").read_text(encoding="utf-8"),
+        )
+        player_payload = self.client.get("/api/players").get_json()["players"][0]
+        self.assertTrue(player_payload["banned"])
+        self.assertEqual(player_payload["role"], "Banned")
+
+    def test_login_name_visibility_can_be_disabled(self) -> None:
+        self.write_player_log()
+        self.login()
+        response = self.client.post(
+            "/security/privacy",
+            data={"csrf_token": self.csrf()},
+        )
+        self.assertEqual(response.status_code, 302)
+        payload = self.client.get("/api/public-status").get_json()
+        self.assertEqual(payload["player_count"], 1)
+        self.assertEqual(payload["players"], [])
 
     def test_settings_and_access_save(self) -> None:
         self.login()

@@ -18,11 +18,14 @@ import secrets
 import shlex
 import shutil
 import sqlite3
+import stat
 import subprocess
+import tarfile
 import tempfile
 import time
+import zipfile
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 import psutil
@@ -67,6 +70,8 @@ ACCESS_FILES = {
 }
 WORLD_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._-]{0,63}$")
 BACKUP_NAME_RE = re.compile(r"^valheim-[0-9]{8}T[0-9]{6}Z\.tar\.gz$")
+WORLD_AUTO_BACKUP_RE = re.compile(r"^.+_backup_auto-[0-9]{8}-[0-9]{6}$")
+WORLD_GENERATION_RE = re.compile(r"^_main\.(?P<generation>[0-9]+)\.(?P<extension>db2|fwl2|chunks|ok)$")
 PLATFORM_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_:-]{1,127}$")
 LOG_TIMESTAMP_RE = re.compile(r"^(?P<timestamp>\d{2}/\d{2}/\d{4} \d{2}:\d{2}:\d{2}):\s*(?P<message>.*)$")
 HANDSHAKE_RE = re.compile(r"Got handshake from client\s+(?P<identifier>[A-Za-z0-9_:-]+)")
@@ -76,6 +81,8 @@ CHARACTER_RE = re.compile(
 CLOSING_SOCKET_RE = re.compile(r"Closing socket\s+(?P<identifier>[A-Za-z0-9_:-]+)")
 MAX_PLAYERS = 10
 PLAYER_PARSER_VERSION = "2"
+MAX_ARCHIVE_MEMBERS = 200_000
+MAX_ARCHIVE_EXPANDED_BYTES = 8 * 1024 * 1024 * 1024
 
 DEFAULT_SETTINGS = {
     "SERVER_NAME": "Valheim Dedicated Server",
@@ -653,23 +660,300 @@ def public_server_status() -> dict[str, Any]:
     }
 
 
-def list_worlds() -> list[dict[str, Any]]:
-    worlds: list[dict[str, Any]] = []
-    if not WORLD_DIR.exists():
-        return worlds
-    for database in sorted(WORLD_DIR.glob("*.db"), key=lambda item: item.stat().st_mtime, reverse=True):
-        name = database.stem
-        world_file = WORLD_DIR / f"{name}.fwl"
-        size = database.stat().st_size + (world_file.stat().st_size if world_file.exists() else 0)
-        worlds.append(
+def safe_archive_parts(raw_name: str) -> tuple[str, ...]:
+    """Return a normalized relative archive path or reject the member."""
+    if not raw_name or "\x00" in raw_name or "\\" in raw_name or len(raw_name) > 1024:
+        raise ValueError("The archive contains an unsafe path.")
+    path = PurePosixPath(raw_name.rstrip("/"))
+    parts = path.parts
+    if path.is_absolute() or not parts or any(part in {"", ".", ".."} for part in parts):
+        raise ValueError("The archive contains an unsafe path.")
+    return parts
+
+
+def inspect_archive(path: Path, *, allow_zip: bool = True) -> tuple[str, list[dict[str, Any]]]:
+    """Inspect regular archive members without extracting or reading their contents."""
+    lower_name = path.name.casefold()
+    entries: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    expanded_size = 0
+
+    def add_entry(name: str, size: int, is_directory: bool) -> None:
+        nonlocal expanded_size
+        parts = safe_archive_parts(name)
+        key = "/".join(part.casefold() for part in parts)
+        if key in seen:
+            raise ValueError("The archive contains duplicate paths.")
+        seen.add(key)
+        expanded_size += size
+        if len(entries) >= MAX_ARCHIVE_MEMBERS or expanded_size > MAX_ARCHIVE_EXPANDED_BYTES:
+            raise ValueError("The archive is too large when extracted.")
+        entries.append(
             {
-                "name": name,
-                "complete": world_file.exists(),
-                "size": human_bytes(size),
-                "updated": relative_time(database.stat().st_mtime),
+                "name": "/".join(parts),
+                "parts": parts,
+                "size": size,
+                "is_dir": is_directory,
             }
         )
-    return worlds
+
+    if lower_name.endswith((".tar.gz", ".tgz")):
+        with tarfile.open(path, mode="r:gz") as archive:
+            for member in archive.getmembers():
+                if not (member.isdir() or member.isfile()):
+                    raise ValueError("The archive contains links or unsupported file types.")
+                add_entry(member.name, member.size if member.isfile() else 0, member.isdir())
+        kind = "tar"
+    elif allow_zip and lower_name.endswith(".zip"):
+        with zipfile.ZipFile(path) as archive:
+            for member in archive.infolist():
+                unix_mode = member.external_attr >> 16
+                if member.flag_bits & 0x1:
+                    raise ValueError("Encrypted archives are not supported.")
+                if unix_mode and stat.S_ISLNK(unix_mode):
+                    raise ValueError("The archive contains links or unsupported file types.")
+                add_entry(member.filename, member.file_size if not member.is_dir() else 0, member.is_dir())
+        kind = "zip"
+    else:
+        raise ValueError("Use a .tar.gz, .tgz, or .zip archive.")
+
+    if not entries:
+        raise ValueError("The archive is empty.")
+    return kind, entries
+
+
+def complete_world_generations(file_names: set[str]) -> list[int]:
+    generations: dict[int, set[str]] = {}
+    for filename in file_names:
+        match = WORLD_GENERATION_RE.fullmatch(filename)
+        if match:
+            generation = int(match.group("generation"))
+            generations.setdefault(generation, set()).add(match.group("extension"))
+    required = {"db2", "fwl2", "chunks", "ok"}
+    return sorted(generation for generation, extensions in generations.items() if required <= extensions)
+
+
+def validate_world_archive(path: Path) -> dict[str, Any]:
+    kind, entries = inspect_archive(path)
+    roots = {entry["parts"][0] for entry in entries}
+    if len(roots) != 1:
+        raise ValueError("A world archive must contain exactly one top-level world folder.")
+    world_name = roots.pop()
+    if not WORLD_NAME_RE.fullmatch(world_name) or WORLD_AUTO_BACKUP_RE.fullmatch(world_name):
+        raise ValueError("The archive has an invalid or reserved world folder name.")
+    if any(len(entry["parts"]) == 1 and not entry["is_dir"] for entry in entries):
+        raise ValueError("World files must be stored inside the top-level world folder.")
+
+    direct_files = {
+        entry["parts"][1]
+        for entry in entries
+        if not entry["is_dir"] and len(entry["parts"]) == 2
+    }
+    generations = complete_world_generations(direct_files)
+    chunk_count = sum(filename.endswith(".chunk") for filename in direct_files)
+    if not generations or chunk_count == 0:
+        raise ValueError(
+            "The archive does not contain a complete Valheim 1.0 world generation and chunk data."
+        )
+    return {
+        "kind": kind,
+        "entries": entries,
+        "world_name": world_name,
+        "generation": generations[-1],
+        "chunk_count": chunk_count,
+    }
+
+
+def validate_backup_archive(path: Path) -> dict[str, Any]:
+    kind, entries = inspect_archive(path, allow_zip=False)
+    if kind != "tar":
+        raise ValueError("Portable server backups must use .tar.gz.")
+    allowed_roots = {"worlds_local", *ACCESS_FILES.values()}
+    for entry in entries:
+        root = entry["parts"][0]
+        if root not in allowed_roots:
+            raise ValueError("The archive contains files outside the portable backup layout.")
+        if root != "worlds_local" and (len(entry["parts"]) != 1 or entry["is_dir"]):
+            raise ValueError("The archive contains an invalid access-list path.")
+
+    regular_names = {entry["name"] for entry in entries if not entry["is_dir"]}
+    missing_access = set(ACCESS_FILES.values()) - regular_names
+    if missing_access:
+        raise ValueError("The archive is missing one or more access lists.")
+
+    directory_files: dict[str, set[str]] = {}
+    legacy_extensions: dict[str, set[str]] = {}
+    for entry in entries:
+        parts = entry["parts"]
+        if entry["is_dir"] or parts[0] != "worlds_local":
+            continue
+        if len(parts) == 3:
+            directory_files.setdefault(parts[1], set()).add(parts[2])
+        elif len(parts) == 2:
+            filename = parts[1]
+            for extension in (".db", ".fwl"):
+                if filename.endswith(extension):
+                    legacy_extensions.setdefault(filename[: -len(extension)], set()).add(extension)
+
+    modern_worlds = [
+        name
+        for name, files in directory_files.items()
+        if WORLD_NAME_RE.fullmatch(name)
+        and not WORLD_AUTO_BACKUP_RE.fullmatch(name)
+        and complete_world_generations(files)
+        and any(filename.endswith(".chunk") for filename in files)
+    ]
+    legacy_worlds = [
+        name
+        for name, extensions in legacy_extensions.items()
+        if WORLD_NAME_RE.fullmatch(name) and {".db", ".fwl"} <= extensions
+    ]
+    if not modern_worlds and not legacy_worlds:
+        raise ValueError("The archive does not contain a complete playable world.")
+    return {
+        "entries": entries,
+        "modern_worlds": sorted(modern_worlds),
+        "legacy_worlds": sorted(legacy_worlds),
+    }
+
+
+def extract_checked_archive(path: Path, destination: Path, kind: str) -> None:
+    """Extract only previously supported regular files and directories."""
+    destination.mkdir(parents=True, exist_ok=True)
+    if kind == "tar":
+        with tarfile.open(path, mode="r:gz") as archive:
+            for member in archive.getmembers():
+                parts = safe_archive_parts(member.name)
+                target = destination.joinpath(*parts)
+                if member.isdir():
+                    target.mkdir(parents=True, exist_ok=True)
+                    continue
+                source = archive.extractfile(member)
+                if source is None:
+                    raise ValueError("The archive contains an unreadable file.")
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with source, target.open("xb") as output:
+                    shutil.copyfileobj(source, output, length=1024 * 1024)
+    elif kind == "zip":
+        with zipfile.ZipFile(path) as archive:
+            for member in archive.infolist():
+                parts = safe_archive_parts(member.filename)
+                target = destination.joinpath(*parts)
+                if member.is_dir():
+                    target.mkdir(parents=True, exist_ok=True)
+                    continue
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with archive.open(member) as source, target.open("xb") as output:
+                    shutil.copyfileobj(source, output, length=1024 * 1024)
+    else:
+        raise ValueError("Unsupported archive type.")
+
+
+def normalize_world_tree(path: Path) -> None:
+    os.chmod(path, 0o2770)
+    for item in path.rglob("*"):
+        if item.is_symlink():
+            raise ValueError("World folders may not contain symbolic links.")
+        if item.is_dir():
+            os.chmod(item, 0o2770)
+        elif item.is_file():
+            os.chmod(item, 0o660)
+        else:
+            raise ValueError("The world contains an unsupported file type.")
+
+
+def directory_world_details(path: Path, active_name: str) -> dict[str, Any]:
+    direct_files = {item.name for item in path.iterdir() if item.is_file() and not item.is_symlink()}
+    generations = complete_world_generations(direct_files)
+    chunk_count = sum(filename.endswith(".chunk") for filename in direct_files)
+    size = 0
+    updated = path.stat().st_mtime
+    for item in path.rglob("*"):
+        if item.is_file() and not item.is_symlink():
+            item_stat = item.stat()
+            size += item_stat.st_size
+            updated = max(updated, item_stat.st_mtime)
+    return {
+        "name": path.name,
+        "kind": "chunked",
+        "format": "Valheim 1.0",
+        "complete": bool(generations and chunk_count),
+        "generation": generations[-1] if generations else None,
+        "chunks": chunk_count,
+        "size": human_bytes(size),
+        "updated": relative_time(updated),
+        "mtime": updated,
+        "active": path.name.casefold() == active_name.casefold(),
+    }
+
+
+def list_worlds() -> list[dict[str, Any]]:
+    if not WORLD_DIR.is_dir():
+        return []
+    active_name = read_settings()["WORLD_NAME"]
+    worlds_by_name: dict[str, dict[str, Any]] = {}
+
+    for item in WORLD_DIR.iterdir():
+        if (
+            item.is_dir()
+            and not item.is_symlink()
+            and WORLD_NAME_RE.fullmatch(item.name)
+            and not WORLD_AUTO_BACKUP_RE.fullmatch(item.name)
+        ):
+            worlds_by_name[item.name.casefold()] = directory_world_details(item, active_name)
+
+    legacy: dict[str, dict[str, Any]] = {}
+    for item in WORLD_DIR.iterdir():
+        if not item.is_file() or item.is_symlink():
+            continue
+        extension = item.suffix.casefold()
+        if extension not in {".db", ".fwl"}:
+            continue
+        name = item.name[: -len(extension)]
+        if not WORLD_NAME_RE.fullmatch(name):
+            continue
+        item_stat = item.stat()
+        record = legacy.setdefault(
+            name.casefold(),
+            {
+                "name": name,
+                "kind": "legacy",
+                "format": "Legacy",
+                "extensions": set(),
+                "bytes": 0,
+                "mtime": item_stat.st_mtime,
+            },
+        )
+        record["extensions"].add(extension)
+        record["bytes"] += item_stat.st_size
+        record["mtime"] = max(record["mtime"], item_stat.st_mtime)
+
+    for key, record in legacy.items():
+        if key in worlds_by_name:
+            continue
+        worlds_by_name[key] = {
+            "name": record["name"],
+            "kind": "legacy",
+            "format": "Legacy",
+            "complete": {".db", ".fwl"} <= record["extensions"],
+            "generation": None,
+            "chunks": None,
+            "size": human_bytes(record["bytes"]),
+            "updated": relative_time(record["mtime"]),
+            "mtime": record["mtime"],
+            "active": record["name"].casefold() == active_name.casefold(),
+        }
+
+    return sorted(
+        worlds_by_name.values(),
+        key=lambda world: (not world["active"], -world["mtime"], world["name"].casefold()),
+    )
+
+
+def find_world(name: str) -> dict[str, Any] | None:
+    if not WORLD_NAME_RE.fullmatch(name):
+        return None
+    return next((world for world in list_worlds() if world["name"].casefold() == name.casefold()), None)
 
 
 def list_backups() -> list[dict[str, str]]:
@@ -736,9 +1020,43 @@ def world_files_exist(name: str) -> bool:
         f"{name}.fwl.old".casefold(),
     }
     return any(
-        item.is_file() and item.name.casefold() in expected
+        (item.is_dir() and item.name.casefold() == name.casefold())
+        or (item.is_file() and item.name.casefold() in expected)
         for item in WORLD_DIR.iterdir()
     )
+
+
+def create_world_archive(world: dict[str, Any]) -> Path:
+    if world["kind"] != "chunked":
+        raise ValueError("Only Valheim 1.0 folder worlds are downloaded as archives.")
+    source = WORLD_DIR / world["name"]
+    if not source.is_dir() or source.is_symlink():
+        raise ValueError("The world folder is unavailable.")
+    descriptor, temporary_name = tempfile.mkstemp(prefix="valheim-world-", suffix=".tar.gz")
+    os.close(descriptor)
+    temporary = Path(temporary_name)
+    try:
+        with tarfile.open(temporary, mode="w:gz") as archive:
+            paths = [source, *sorted(source.rglob("*"), key=lambda item: item.as_posix())]
+            for path in paths:
+                if path.is_symlink() or not (path.is_dir() or path.is_file()):
+                    raise ValueError("The world contains an unsupported file type.")
+                archive_name = str(PurePosixPath(source.name, *path.relative_to(source).parts))
+                info = archive.gettarinfo(str(path), arcname=archive_name)
+                info.uid = 0
+                info.gid = 0
+                info.uname = "valheim"
+                info.gname = "valheim-admin"
+                info.mode = 0o750 if path.is_dir() else 0o640
+                if path.is_dir():
+                    archive.addfile(info)
+                else:
+                    with path.open("rb") as handle:
+                        archive.addfile(info, handle)
+        return temporary
+    except Exception:
+        temporary.unlink(missing_ok=True)
+        raise
 
 
 def ensure_world_change_is_safe() -> None:
@@ -786,7 +1104,7 @@ def create_app() -> Flask:
     )
     application.secret_key = config["session_secret"]
     application.config.update(
-        MAX_CONTENT_LENGTH=256 * 1024 * 1024,
+        MAX_CONTENT_LENGTH=2 * 1024 * 1024 * 1024,
         SESSION_COOKIE_HTTPONLY=True,
         SESSION_COOKIE_SAMESITE="Strict",
         PERMANENT_SESSION_LIFETIME=8 * 60 * 60,
@@ -993,15 +1311,18 @@ def create_app() -> Flask:
     @application.post("/world/select/<name>")
     @login_required
     def world_select(name: str):
-        if (
-            not WORLD_NAME_RE.fullmatch(name)
-            or not (WORLD_DIR / f"{name}.db").is_file()
-            or not (WORLD_DIR / f"{name}.fwl").is_file()
-        ):
+        world = find_world(name)
+        if not world or not world["complete"]:
             abort(404)
         try:
-            activate_world(name)
-            flash(f"World {name} selected and the server restarted.", "success")
+            activate_world(world["name"])
+            if world["kind"] == "legacy":
+                flash(
+                    f"Legacy world {world['name']} activated. Valheim 1.0 is migrating it to the new folder format.",
+                    "success",
+                )
+            else:
+                flash(f"World {world['name']} selected and the server restarted.", "success")
         except (ValueError, RuntimeError, OSError, subprocess.TimeoutExpired) as error:
             flash(str(error), "error")
         return redirect(url_for("dashboard", tab="worlds"))
@@ -1029,12 +1350,13 @@ def create_app() -> Flask:
     @application.post("/world/backup/<name>")
     @login_required
     def world_backup(name: str):
-        if not WORLD_NAME_RE.fullmatch(name) or not (WORLD_DIR / f"{name}.db").is_file():
+        world = find_world(name)
+        if not world:
             abort(404)
         try:
             control("backup")
             flash(
-                f"Snapshot created. The archive includes {name} and the complete world library.",
+                f"Snapshot created. The archive includes {world['name']} and the complete world library.",
                 "success",
             )
         except (RuntimeError, OSError, subprocess.TimeoutExpired) as error:
@@ -1044,33 +1366,61 @@ def create_app() -> Flask:
     @application.post("/world/delete/<name>")
     @login_required
     def world_delete(name: str):
-        if not WORLD_NAME_RE.fullmatch(name):
+        world = find_world(name)
+        if not world:
             abort(404)
-        if read_settings()["WORLD_NAME"] == name:
+        if world["active"]:
             flash("The active world cannot be deleted. Select another world first.", "error")
             return redirect(url_for("dashboard", tab="worlds"))
-        removed = False
-        for suffix in (".db", ".fwl", ".db.old", ".fwl.old"):
-            candidate = WORLD_DIR / f"{name}{suffix}"
-            if candidate.is_file():
-                candidate.unlink()
-                removed = True
-        flash(f"World {name} deleted." if removed else "World files were not found.", "success" if removed else "error")
+        try:
+            ensure_world_change_is_safe()
+            control("backup")
+            if world["kind"] == "chunked":
+                candidate = (WORLD_DIR / world["name"]).resolve()
+                if candidate.parent != WORLD_DIR.resolve() or not candidate.is_dir() or candidate.is_symlink():
+                    raise ValueError("The world folder could not be validated.")
+                shutil.rmtree(candidate)
+            else:
+                for suffix in (".db", ".fwl", ".db.old", ".fwl.old"):
+                    candidate = WORLD_DIR / f"{world['name']}{suffix}"
+                    if candidate.is_file() and not candidate.is_symlink():
+                        candidate.unlink()
+            flash(f"World {world['name']} deleted after creating a safety snapshot.", "success")
+        except (ValueError, RuntimeError, OSError, subprocess.TimeoutExpired) as error:
+            flash(str(error), "error")
         return redirect(url_for("dashboard", tab="worlds"))
 
     @application.get("/world/download/<name>/<extension>")
     @login_required
     def world_download(name: str, extension: str):
-        if not WORLD_NAME_RE.fullmatch(name) or extension not in {"db", "fwl"}:
+        world = find_world(name)
+        if not world or extension not in {"archive", "db", "fwl"}:
             abort(404)
-        path = WORLD_DIR / f"{name}.{extension}"
+        if extension == "archive":
+            if world["kind"] != "chunked":
+                abort(404)
+            try:
+                temporary = create_world_archive(world)
+            except (ValueError, OSError, tarfile.TarError):
+                abort(500)
+            response = send_file(
+                temporary,
+                as_attachment=True,
+                download_name=f"{world['name']}.tar.gz",
+            )
+            response.call_on_close(lambda: temporary.unlink(missing_ok=True))
+            return response
+        if world["kind"] != "legacy":
+            abort(404)
+        path = WORLD_DIR / f"{world['name']}.{extension}"
         if not path.is_file():
             abort(404)
         return send_file(path, as_attachment=True, download_name=path.name)
 
     @application.post("/world/upload")
+    @application.post("/world/upload/legacy")
     @login_required
-    def world_upload():
+    def world_upload_legacy():
         database = request.files.get("database")
         descriptor = request.files.get("descriptor")
         if not database or not descriptor:
@@ -1091,16 +1441,59 @@ def create_app() -> Flask:
                 "error",
             )
             return redirect(url_for("dashboard", tab="worlds"))
-        WORLD_DIR.mkdir(parents=True, exist_ok=True)
+        WORLD_DIR.mkdir(parents=True, exist_ok=True, mode=0o2770)
         with tempfile.TemporaryDirectory(dir=WORLD_DIR) as temporary:
             staging = Path(temporary)
             database.save(staging / database_name)
             descriptor.save(staging / descriptor_name)
+            if not (staging / database_name).stat().st_size or not (staging / descriptor_name).stat().st_size:
+                flash("Legacy world files may not be empty.", "error")
+                return redirect(url_for("dashboard", tab="worlds"))
             os.replace(staging / database_name, WORLD_DIR / database_name)
             os.replace(staging / descriptor_name, WORLD_DIR / descriptor_name)
             os.chmod(WORLD_DIR / database_name, 0o660)
             os.chmod(WORLD_DIR / descriptor_name, 0o660)
-        flash(f"World {world_name} uploaded.", "success")
+        flash(
+            f"Legacy world {world_name} uploaded. Use Migrate & activate to let Valheim 1.0 convert it safely.",
+            "success",
+        )
+        return redirect(url_for("dashboard", tab="worlds"))
+
+    @application.post("/world/upload/archive")
+    @login_required
+    def world_upload_archive():
+        upload = request.files.get("world_archive")
+        filename = secure_filename(upload.filename or "") if upload else ""
+        if not upload or not filename.casefold().endswith((".tar.gz", ".tgz", ".zip")):
+            flash("Select a Valheim 1.0 .tar.gz, .tgz, or .zip world archive.", "error")
+            return redirect(url_for("dashboard", tab="worlds"))
+        WORLD_DIR.mkdir(parents=True, exist_ok=True, mode=0o2770)
+        try:
+            with tempfile.TemporaryDirectory(dir=WORLD_DIR, prefix=".world-import-") as temporary:
+                staging = Path(temporary)
+                archive_path = staging / filename
+                extracted = staging / "extracted"
+                upload.save(archive_path)
+                metadata = validate_world_archive(archive_path)
+                world_name = metadata["world_name"]
+                if world_files_exist(world_name):
+                    raise ValueError(
+                        "A world with this name already exists. Existing worlds are never overwritten."
+                    )
+                extract_checked_archive(archive_path, extracted, metadata["kind"])
+                imported_world = extracted / world_name
+                if not imported_world.is_dir():
+                    raise ValueError("The archive did not produce the expected world folder.")
+                normalize_world_tree(imported_world)
+                if world_files_exist(world_name):
+                    raise ValueError("A world with this name appeared during the import. Nothing was overwritten.")
+                os.replace(imported_world, WORLD_DIR / world_name)
+            flash(
+                f"Valheim 1.0 world {world_name} imported. Activate it when the server is empty.",
+                "success",
+            )
+        except (ValueError, OSError, tarfile.TarError, zipfile.BadZipFile) as error:
+            flash(str(error), "error")
         return redirect(url_for("dashboard", tab="worlds"))
 
     @application.get("/backup/download/<name>")
@@ -1119,9 +1512,55 @@ def create_app() -> Flask:
         if not BACKUP_NAME_RE.fullmatch(name):
             abort(404)
         try:
+            archive = BACKUP_DIR / name
+            if not archive.is_file():
+                abort(404)
+            metadata = validate_backup_archive(archive)
+            available_worlds = {
+                world.casefold()
+                for world in (*metadata["modern_worlds"], *metadata["legacy_worlds"])
+            }
+            active_world = read_settings()["WORLD_NAME"]
+            if active_world.casefold() not in available_worlds:
+                raise ValueError(
+                    f"This backup does not contain the currently selected world {active_world}. "
+                    "Import its world separately or restore a matching server backup."
+                )
+            ensure_world_change_is_safe()
             output = control("restore", name)
             flash(output, "success")
-        except (RuntimeError, subprocess.TimeoutExpired) as error:
+        except (ValueError, RuntimeError, OSError, subprocess.TimeoutExpired, tarfile.TarError) as error:
+            flash(str(error), "error")
+        return redirect(url_for("dashboard", tab="backups"))
+
+    @application.post("/backup/upload")
+    @login_required
+    def backup_upload():
+        upload = request.files.get("backup_archive")
+        filename = secure_filename(upload.filename or "") if upload else ""
+        if not upload or not BACKUP_NAME_RE.fullmatch(filename):
+            flash("Select an original valheim-YYYYMMDDTHHMMSSZ.tar.gz server backup.", "error")
+            return redirect(url_for("dashboard", tab="backups"))
+        BACKUP_DIR.mkdir(parents=True, exist_ok=True, mode=0o2770)
+        destination = BACKUP_DIR / filename
+        if destination.exists():
+            flash("A backup with this name already exists. It was not overwritten.", "error")
+            return redirect(url_for("dashboard", tab="backups"))
+        try:
+            with tempfile.TemporaryDirectory(dir=BACKUP_DIR, prefix=".backup-import-") as temporary:
+                staging = Path(temporary) / filename
+                upload.save(staging)
+                metadata = validate_backup_archive(staging)
+                if destination.exists():
+                    raise ValueError("A backup with this name appeared during the upload.")
+                os.replace(staging, destination)
+                os.chmod(destination, 0o660)
+            world_count = len(metadata["modern_worlds"]) + len(metadata["legacy_worlds"])
+            flash(
+                f"Server backup uploaded and validated ({world_count} playable world(s)). Review it before restoring.",
+                "success",
+            )
+        except (ValueError, OSError, tarfile.TarError) as error:
             flash(str(error), "error")
         return redirect(url_for("dashboard", tab="backups"))
 
@@ -1191,6 +1630,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Valheim admin panel")
     parser.add_argument("--set-password", nargs=2, metavar=("USERNAME", "PASSWORD"))
     parser.add_argument("--online-player-count", action="store_true")
+    parser.add_argument("--validate-backup-archive", type=Path, metavar="ARCHIVE")
     args = parser.parse_args()
     if args.set_password:
         set_password(*args.set_password)
@@ -1200,6 +1640,14 @@ def main() -> None:
             print(online_player_count())
         except Exception as error:
             raise SystemExit(f"Could not determine the online player count: {error}") from error
+        return
+    if args.validate_backup_archive:
+        try:
+            metadata = validate_backup_archive(args.validate_backup_archive)
+        except (ValueError, OSError, tarfile.TarError) as error:
+            raise SystemExit(f"Invalid portable backup: {error}") from error
+        world_count = len(metadata["modern_worlds"]) + len(metadata["legacy_worlds"])
+        print(f"Validated portable backup with {world_count} playable world(s).")
         return
     parser.error("Start the panel with Waitress or use a supported command option.")
 

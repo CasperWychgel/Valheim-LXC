@@ -3,4 +3,25 @@ __pycache__/
 .pytest_cache/
 .venv/
 .qa-deps/
+.qa-runtime/
 *.log
+
+# Never publish live Valheim state, credentials, identities, or exported saves.
+# Local archives may contain complete worlds, seeds, access lists, or identities.
+*.tar.gz
+*.tgz
+*.zip
+worlds_local/
+*.db
+*.fwl
+*.db2
+*.fwl2
+*.chunk
+_main.*.chunks
+_main.*.ok
+adminlist.txt
+bannedlist.txt
+permittedlist.txt
+players.sqlite3*
+server.env
+panel.json

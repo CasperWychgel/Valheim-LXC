@@ -450,17 +450,47 @@ case "$action" in
     [[ $# -eq 2 && $argument =~ ^valheim-[0-9]{8}T[0-9]{6}Z\.tar\.gz$ ]] || { echo "Invalid backup name." >&2; exit 2; }
     archive="$backup_dir/$argument"
     [[ -f $archive ]] || { echo "Backup does not exist." >&2; exit 2; }
-    if tar -tzf "$archive" | grep -Eq '(^/|(^|/)\.\.(/|$))'; then
-      echo "Unsafe backup archive." >&2
-      exit 2
-    fi
+    staging=$(mktemp -d /opt/valheim/.restore.XXXXXX)
+    rollback=$(mktemp -d /opt/valheim/.restore-rollback.XXXXXX)
+    [[ $staging == /opt/valheim/.restore.* && $rollback == /opt/valheim/.restore-rollback.* ]] \
+      || { echo "Unsafe restore workspace." >&2; exit 2; }
     was_active=0
     systemctl is-active --quiet valheim.service && was_active=1
+    restore_complete=0
+    cleanup_restore() {
+      status=$?
+      set +e
+      if ((restore_complete == 0)); then
+        if [[ -d $rollback/data ]]; then
+          [[ ! -e $data_dir ]] || mv -- "$data_dir" "$rollback/failed-data"
+          mv -- "$rollback/data" "$data_dir"
+          chown -R valheim:valheim-admin "$data_dir"
+        fi
+        ((was_active == 0)) || systemctl start valheim.service
+      fi
+      rm -rf -- "$staging" "$rollback"
+      exit "$status"
+    }
+    trap cleanup_restore EXIT
+    archive_copy="$staging/portable-backup.tar.gz"
+    install -o root -g root -m 0600 "$archive" "$archive_copy"
+    python3 /opt/valheim/panel/app.py --validate-backup-archive "$archive_copy"
     ((was_active == 0)) || systemctl stop valheim.service
-    tar -xzf "$archive" -C "$data_dir"
+    /opt/valheim/bin/backup-server
+    tar --extract --gzip --file "$archive_copy" --directory "$staging" \
+      --no-same-owner --no-same-permissions
+    rm -f -- "$archive_copy"
+    for item in worlds_local adminlist.txt bannedlist.txt permittedlist.txt; do
+      [[ -e $staging/$item ]] || { echo "Backup is missing $item." >&2; exit 2; }
+    done
+    mv -- "$data_dir" "$rollback/data"
+    mv -- "$staging" "$data_dir"
     chown -R valheim:valheim-admin "$data_dir"
+    find "$data_dir" -type d -exec chmod 2770 {} +
+    find "$data_dir" -type f -exec chmod 0660 {} +
     ((was_active == 0)) || systemctl start valheim.service
-    printf 'Restored %s\n' "$argument"
+    restore_complete=1
+    printf 'Restored %s after creating a safety snapshot. Server and panel settings were unchanged.\n' "$argument"
     ;;
   logs)
     [[ $# -eq 1 ]] || { echo "Unexpected argument." >&2; exit 2; }

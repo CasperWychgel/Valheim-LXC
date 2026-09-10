@@ -244,29 +244,43 @@
           </form>
 
           <section class="panel-card form-stack world-import-card">
-            <div><p class="eyebrow">Custom seed</p><h2>Import an existing world</h2><p>Create the desired seed in the Valheim client, then upload its matching <code>.db</code> and <code>.fwl</code> files. Existing worlds are never overwritten.</p></div>
-            <form method="post" action="{{ url_for('world_upload') }}" enctype="multipart/form-data" class="upload-form">
-              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-              <label><span>World database (.db)</span><input type="file" name="database" accept=".db" required></label>
-              <label><span>World descriptor (.fwl)</span><input type="file" name="descriptor" accept=".fwl" required></label>
-              <button class="button" type="submit">Upload world</button>
-            </form>
+            <div><p class="eyebrow">World import</p><h2>Import or migrate a world</h2><p>Upload a complete Valheim 1.0 world folder as an archive, or provide a matching legacy pair. Existing worlds are never overwritten.</p></div>
+            <div class="import-options">
+              <section class="import-option">
+                <div><span class="format-label">Valheim 1.0</span><h3>World archive</h3><p>Archive exactly one complete world folder, including its <code>_main.*</code> and chunk files.</p></div>
+                <form method="post" action="{{ url_for('world_upload_archive') }}" enctype="multipart/form-data" class="compact-upload-form" data-busy="Validating and importing world…">
+                  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                  <label><span>World archive</span><input type="file" name="world_archive" accept=".tar.gz,.tgz,.zip,application/gzip,application/zip" required><small>Accepted: .tar.gz, .tgz, or .zip</small></label>
+                  <button class="button" type="submit">Import world</button>
+                </form>
+              </section>
+              <section class="import-option">
+                <div><span class="format-label legacy">Legacy</span><h3>World migration</h3><p>Upload the matching <code>.db</code> and <code>.fwl</code> files. Valheim 1.0 converts them when you activate the world.</p></div>
+                <form method="post" action="{{ url_for('world_upload_legacy') }}" enctype="multipart/form-data" class="legacy-upload-form" data-busy="Validating legacy world…">
+                  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                  <label><span>Database (.db)</span><input type="file" name="database" accept=".db" required></label>
+                  <label><span>Descriptor (.fwl)</span><input type="file" name="descriptor" accept=".fwl" required></label>
+                  <button class="button" type="submit">Upload for migration</button>
+                </form>
+              </section>
+            </div>
           </section>
         </section>
         <section class="panel-card table-card">
-          <div class="card-heading"><div><p class="eyebrow">World library</p><h2>Available worlds</h2><p>World switches create a snapshot, require an empty server, and restart Valheim automatically.</p></div><span class="count-badge">{{ worlds|length }} worlds</span></div>
+          <div class="card-heading"><div><p class="eyebrow">World library</p><h2>Available worlds</h2><p>Valheim 1.0 folders and legacy pairs are detected automatically. Changes create a snapshot and require an empty server.</p></div><span class="count-badge">{{ worlds|length }} world{% if worlds|length != 1 %}s{% endif %}</span></div>
           {% if worlds %}
             <div class="data-table world-table">
-              <div class="table-row table-head"><span>World</span><span>Updated</span><span>Size</span><span>Actions</span></div>
+              <div class="table-row table-head"><span>World</span><span>Format</span><span>Updated</span><span>Size</span><span>Actions</span></div>
               {% for world in worlds %}
                 <div class="table-row">
-                  <span><strong>{{ world.name }}</strong>{% if settings.WORLD_NAME == world.name %}<small class="active-label">Active</small>{% elif not world.complete %}<small class="warning-label">Missing .fwl</small>{% endif %}</span>
+                  <span><strong>{{ world.name }}</strong>{% if world.active %}<small class="active-label">Active</small>{% elif not world.complete %}<small class="warning-label">Incomplete</small>{% endif %}</span>
+                  <span data-label="Format"><strong class="format-name">{{ world.format }}</strong><small>{% if world.kind == 'chunked' and world.generation %}Generation {{ world.generation }} · {{ world.chunks }} chunk{% if world.chunks != 1 %}s{% endif %}{% elif world.complete %}Ready to migrate{% else %}Missing matching files{% endif %}</small></span>
                   <span data-label="Updated">{{ world.updated }}</span><span data-label="Size">{{ world.size }}</span>
                   <span class="table-actions" data-label="Actions">
-                    {% if world.complete and settings.WORLD_NAME != world.name %}<form method="post" action="{{ url_for('world_select', name=world.name) }}" data-confirm="Switch to {{ world.name }}? A snapshot will be created and the server will restart."><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="text-button" type="submit">Select & restart</button></form>{% endif %}
+                    {% if world.complete and not world.active %}<form method="post" action="{{ url_for('world_select', name=world.name) }}" data-confirm="{% if world.kind == 'legacy' %}Migrate and activate {{ world.name }} with Valheim 1.0?{% else %}Switch to {{ world.name }}?{% endif %} A snapshot will be created and the server will restart."><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="text-button" type="submit">{% if world.kind == 'legacy' %}Migrate & activate{% else %}Activate & restart{% endif %}</button></form>{% endif %}
                     <form method="post" action="{{ url_for('world_backup', name=world.name) }}" data-busy="Creating snapshot…"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="text-button" type="submit">Back up</button></form>
-                    <a href="{{ url_for('world_download', name=world.name, extension='db') }}">Download DB</a>{% if world.complete %}<a href="{{ url_for('world_download', name=world.name, extension='fwl') }}">Download FWL</a>{% endif %}
-                    {% if settings.WORLD_NAME != world.name %}<form method="post" action="{{ url_for('world_delete', name=world.name) }}" data-confirm="Delete world {{ world.name }}? This cannot be undone unless you have a backup."><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="text-button danger" type="submit">Delete</button></form>{% endif %}
+                    {% if world.kind == 'chunked' %}<a href="{{ url_for('world_download', name=world.name, extension='archive') }}">Download archive</a>{% else %}<a href="{{ url_for('world_download', name=world.name, extension='db') }}">Download DB</a>{% if world.complete %}<a href="{{ url_for('world_download', name=world.name, extension='fwl') }}">Download FWL</a>{% endif %}{% endif %}
+                    {% if not world.active %}<form method="post" action="{{ url_for('world_delete', name=world.name) }}" data-confirm="Delete world {{ world.name }}? A final safety snapshot will be created first."><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="text-button danger" type="submit">Delete</button></form>{% endif %}
                   </span>
                 </div>
               {% endfor %}
@@ -279,13 +293,21 @@
           <div><p class="eyebrow">Archive policy</p><h2>Portable server snapshots</h2></div>
           <div class="inline-actions"><p>Archives include worlds and all three access lists. The newest 30 are retained.</p><form method="post" action="{{ url_for('action', action='backup') }}" data-busy="Creating archive…"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="button primary" type="submit">Back up now</button></form></div>
         </section>
+        <section class="panel-card backup-import-card">
+          <div><p class="eyebrow">Server data restore</p><h2>Upload a portable backup</h2><p>Upload an original <code>valheim-YYYYMMDDTHHMMSSZ.tar.gz</code> archive. It is validated and added to the vault first; restoring remains a separate confirmed action.</p><small>Restores worlds and access lists. Server name, password, network settings, and panel credentials remain unchanged.</small></div>
+          <form method="post" action="{{ url_for('backup_upload') }}" enctype="multipart/form-data" class="backup-upload-form" data-busy="Validating server backup…">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <label><span>Portable server backup</span><input type="file" name="backup_archive" accept=".tar.gz,application/gzip" required></label>
+            <button class="button" type="submit">Upload to vault</button>
+          </form>
+        </section>
         <section class="panel-card table-card">
-          <div class="card-heading"><div><p class="eyebrow">Vault</p><h2>Available archives</h2></div><span class="count-badge">{{ backups|length }} backups</span></div>
+          <div class="card-heading"><div><p class="eyebrow">Vault</p><h2>Available archives</h2></div><span class="count-badge">{{ backups|length }} backup{% if backups|length != 1 %}s{% endif %}</span></div>
           {% if backups %}
             <div class="data-table backup-table">
               <div class="table-row table-head"><span>Archive</span><span>Created</span><span>Size</span><span>Actions</span></div>
               {% for backup in backups %}
-                <div class="table-row"><span><strong>{{ backup.name }}</strong></span><span>{{ backup.updated }}</span><span>{{ backup.size }}</span><span class="table-actions"><a href="{{ url_for('backup_download', name=backup.name) }}">Download</a><form method="post" action="{{ url_for('backup_restore', name=backup.name) }}" data-confirm="Restore {{ backup.name }}? The game server will stop briefly if it is running."><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="text-button" type="submit">Restore</button></form><form method="post" action="{{ url_for('backup_delete', name=backup.name) }}" data-confirm="Permanently delete {{ backup.name }}?"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="text-button danger" type="submit">Delete</button></form></span></div>
+                <div class="table-row"><span><strong>{{ backup.name }}</strong></span><span>{{ backup.updated }}</span><span>{{ backup.size }}</span><span class="table-actions"><a href="{{ url_for('backup_download', name=backup.name) }}">Download</a><form method="post" action="{{ url_for('backup_restore', name=backup.name) }}" data-confirm="Restore {{ backup.name }}? A safety snapshot will be created first. Worlds and access lists will be replaced; server and panel settings stay unchanged."><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="text-button" type="submit">Restore</button></form><form method="post" action="{{ url_for('backup_delete', name=backup.name) }}" data-confirm="Permanently delete {{ backup.name }}?"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="text-button danger" type="submit">Delete</button></form></span></div>
               {% endfor %}
             </div>
           {% else %}<div class="empty-state"><strong>No archives yet</strong><p>Create the first portable snapshot now.</p></div>{% endif %}

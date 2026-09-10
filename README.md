@@ -88,8 +88,8 @@ Open the panel, sign in, and your realm is ready to configure.
 | **Players** | See online and known players, copy platform IDs or kick commands, and manage bans |
 | **Settings** | Change the server name, password, visibility, Crossplay, save policy, preset, and world modifiers |
 | **Access** | Maintain Valheim administrator, ban, and allow lists |
-| **Worlds** | Create a fresh random world, import a custom-seed world, switch safely, back up, download, or delete inactive worlds |
-| **Backups** | Create, download, restore, and delete portable server archives |
+| **Worlds** | Create a fresh world, import Valheim 1.0 archives or legacy world pairs, migrate, switch safely, download, back up, or delete inactive worlds |
+| **Backups** | Create, upload, validate, download, restore, and delete portable server-data archives |
 | **Logs** | Read recent Valheim service output without opening a shell |
 | **Security** | Change the panel password and control player-name visibility on the sign-in page |
 
@@ -118,7 +118,11 @@ page.
 Valheim keeps its own rolling world backups. In addition, this project creates
 portable `.tar.gz` archives containing all worlds and the three access lists.
 The newest 30 archives are retained and can be downloaded or restored from the
-panel.
+panel. A downloaded archive can later be uploaded back into the Backup Vault.
+Uploads are validated before they become restorable, and a restore creates a
+fresh safety snapshot before replacing the server data. Server name, game
+password, network settings, and panel credentials are never imported from a
+portable backup.
 
 ### Safe world changes
 
@@ -127,17 +131,23 @@ panel creates a snapshot, updates the active world, and restarts Valheim. If
 that restart fails, it restores the previous configuration and attempts to
 restart the previous world.
 
-For a specific seed:
+Valheim 1.0 stores each world in its own folder with `_main.*` metadata and
+chunk files. To move an existing 1.0 world, archive exactly that complete
+folder as `.tar.gz`, `.tgz`, or `.zip`, then upload it under **Worlds → Import
+or migrate a world → Valheim 1.0**.
 
-1. Create the desired world in a Valheim client.
-2. Locate its matching `WORLDNAME.db` and `WORLDNAME.fwl` files.
-3. Upload both files under **Worlds → Import an existing world**.
-4. Select the imported world when the server is empty.
+Pre-1.0 worlds remain supported. Upload the matching `WORLDNAME.db` and
+`WORLDNAME.fwl` files under **Legacy → World migration**. The World Library
+marks the pair as **Ready to migrate**. When you choose **Migrate & activate**,
+the panel takes a snapshot and lets the current Valheim server perform its own
+official conversion during startup.
 
-The panel never overwrites an existing world pair, and the active world cannot
-be deleted. Valheim does not document a dedicated-server startup option for
-entering a seed directly, so the import workflow avoids presenting a setting
-the server does not officially provide.
+The panel never reimplements or modifies Valheim's world format. It never
+overwrites an existing world, the active world cannot be deleted, and automatic
+`*_backup_auto-*` folders stay out of the playable World Library. Valheim does
+not document a dedicated-server startup option for entering a seed directly,
+so the workflow avoids presenting a setting the server does not officially
+provide.
 
 ## Before you start
 
@@ -387,7 +397,8 @@ pct exec 101 -- grep -Ei \
 
 This is expected while players are online or when the panel cannot safely
 verify player activity. Wait for the server to become empty and refresh the
-Worlds page. Imported worlds also require a matching `.db` and `.fwl` pair.
+Worlds page. A Valheim 1.0 import must contain a complete world folder; a
+legacy import requires a matching `.db` and `.fwl` pair.
 
 ## Security model
 
@@ -400,6 +411,9 @@ Worlds page. Imported worlds also require a matching `.db` and `.fwl` pair.
 - State-changing forms require CSRF tokens.
 - HTML responses include a restrictive Content Security Policy.
 - Uploaded world names, settings, backup names, and platform IDs are validated.
+- World and backup archives reject path traversal, links, duplicate paths,
+  unsupported layouts, incomplete saves, and excessive expanded sizes.
+- Portable backups intentionally exclude server settings and panel credentials.
 
 The panel is still a powerful control plane: it can stop the game, switch
 worlds, and restore backups. Keep it on a trusted LAN or behind a VPN.
@@ -443,8 +457,10 @@ server stack.
 <details>
 <summary><strong>Can I use an existing Valheim world?</strong></summary>
 
-Yes. Upload the matching `.db` and `.fwl` files under **Worlds**, then select
-the imported world while the server is empty.
+Yes. Upload a complete Valheim 1.0 world-folder archive under **Worlds**. For a
+pre-1.0 save, upload its matching `.db` and `.fwl` files; selecting it lets
+Valheim migrate the save during startup. World changes are available only while
+the server is empty.
 
 </details>
 

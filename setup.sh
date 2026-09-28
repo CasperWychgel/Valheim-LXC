@@ -190,8 +190,12 @@ if [[ ! -f $VALHEIM_HOME/server/BepInEx/core/BepInEx.Preloader.dll ]]; then
   rm -f "$bepinex_archive"
 fi
 
-if [[ ! -x $VALHEIM_HOME/server/run_bepinex.sh ]]; then
+if [[ ! -f $VALHEIM_HOME/server/run_bepinex.sh ]]; then
   die "BepInEx is missing run_bepinex.sh after extraction."
+fi
+chmod 0750 "$VALHEIM_HOME/server/run_bepinex.sh"
+if [[ ! -x $VALHEIM_HOME/server/run_bepinex.sh ]]; then
+  die "BepInEx run_bepinex.sh is not executable."
 fi
 
 ensure_bepinex_link() {
@@ -211,7 +215,6 @@ ensure_bepinex_link "$VALHEIM_HOME/server/BepInEx/plugins" "$VALHEIM_HOME/data/m
 ensure_bepinex_link "$VALHEIM_HOME/server/BepInEx/patchers" "$VALHEIM_HOME/data/mods/patchers"
 ensure_bepinex_link "$VALHEIM_HOME/server/BepInEx/config" "$VALHEIM_HOME/data/mods/config"
 chown -R valheim:valheim-admin "$VALHEIM_HOME/server/BepInEx" "$VALHEIM_HOME/data/mods"
-chmod 0750 "$VALHEIM_HOME/server/run_bepinex.sh"
 
 say "Writing the server configuration and maintenance tools"
 SERVER_CONFIG_CREATED=0

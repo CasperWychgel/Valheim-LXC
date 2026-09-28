@@ -339,6 +339,19 @@
             <div><p class="eyebrow">Provider install</p><h2>Install from catalog</h2><p>Dependencies are resolved and installed automatically.</p></div>
             <label><span>Provider</span><select name="provider">{% for provider in mod_providers %}<option value="{{ provider.key }}">{{ provider.label }}</option>{% endfor %}</select></label>
             <label><span>Community</span><input value="{{ mod_default_community }}" disabled><small>Using <code>{{ mod_default_community }}</code> community scope.</small></label>
+            <section class="mod-search" data-mod-search data-csrf="{{ csrf_token }}">
+              <div><p class="eyebrow">Catalog search</p><h3>Find mods by author or package name</h3></div>
+              <div class="mod-search-controls">
+                <label><span>Search query</span><input type="search" name="search_query" placeholder="RandyKnapp or EpicLoot" minlength="2" autocomplete="off"></label>
+                <button class="button" type="button" data-mod-search-submit>Search catalog</button>
+              </div>
+              <p class="mod-search-hint">Choose Install on a result to install its latest version with dependencies.</p>
+              <p class="mod-search-status" data-mod-search-status aria-live="polite"></p>
+              <div class="data-table mod-search-table hidden" data-mod-search-results>
+                <div class="table-row table-head"><span>Package</span><span>Latest</span><span>Signals</span><span>Actions</span></div>
+              </div>
+            </section>
+            <p class="mod-search-manual">Manual install: enter namespace and package name directly.</p>
             <label><span>Namespace</span><input name="namespace" placeholder="AuthorName" required></label>
             <label><span>Package name</span><input name="package_name" placeholder="ModName" required></label>
             <label><span>Version (optional)</span><input name="version" placeholder="latest"></label>

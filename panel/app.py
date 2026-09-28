@@ -100,6 +100,7 @@ PLAYER_PARSER_VERSION = "2"
 MAX_ARCHIVE_MEMBERS = 200_000
 MAX_ARCHIVE_EXPANDED_BYTES = 8 * 1024 * 1024 * 1024
 MAX_DOWNLOAD_BYTES = 512 * 1024 * 1024
+MAX_MOD_SEARCH_RESULTS = 50
 
 MOD_PROVIDER_BASE_URLS = {
     "thunderstore": "https://thunderstore.io",
@@ -641,13 +642,29 @@ def fetch_provider_package(
     details_url = (
         f"{base_url}/api/experimental/frontend/c/{encoded_community}/p/{encoded_namespace}/{encoded_name}/"
     )
-    details = http_get_json(details_url)
-    versions = details.get("versions") if isinstance(details, dict) else None
-    if not isinstance(versions, list) or not versions:
-        fallback_url = f"{base_url}/api/experimental/package/{encoded_namespace}/{encoded_name}/"
-        details = http_get_json(fallback_url)
-        versions = [details.get("latest", {})] if isinstance(details, dict) else []
+    fallback_url = f"{base_url}/api/experimental/package/{encoded_namespace}/{encoded_name}/"
+    versions: list[dict[str, Any]] = []
+    provider_error: RuntimeError | None = None
+    for metadata_url in (details_url, fallback_url):
+        try:
+            details = http_get_json(metadata_url)
+        except RuntimeError as error:
+            provider_error = error
+            continue
+        if not isinstance(details, dict):
+            continue
+        frontend_versions = details.get("versions")
+        if isinstance(frontend_versions, list) and frontend_versions:
+            versions = [candidate for candidate in frontend_versions if isinstance(candidate, dict)]
+            if versions:
+                break
+        latest = details.get("latest")
+        if isinstance(latest, dict) and latest:
+            versions = [latest]
+            break
     if not versions:
+        if provider_error is not None:
+            raise provider_error
         raise ValueError("The requested package has no published versions.")
 
     selected_version = version
@@ -679,6 +696,111 @@ def fetch_provider_package(
         "download_url": download_url,
         "dependencies": dependencies,
     }
+
+
+def search_provider_packages(
+    provider: str,
+    community: str,
+    query: str,
+    *,
+    limit: int = 25,
+) -> list[dict[str, Any]]:
+    provider = normalize_mod_provider(provider)
+    community = normalize_mod_token(community, field="community")
+    search_query = query.strip()
+    if len(search_query) < 2:
+        raise ValueError("Search query must contain at least 2 characters.")
+    if len(search_query) > 80:
+        raise ValueError("Search query must be shorter than 80 characters.")
+
+    bounded_limit = max(1, min(limit, MAX_MOD_SEARCH_RESULTS))
+    base_url = MOD_PROVIDER_BASE_URLS[provider]
+    encoded_community = urllib.parse.quote(community, safe="")
+    search_url = (
+        f"{base_url}/c/{encoded_community}/api/v1/package/?"
+        f"{urllib.parse.urlencode({'q': search_query})}"
+    )
+
+    payload = http_get_json(search_url)
+    if not isinstance(payload, list):
+        raise RuntimeError("Provider API returned unexpected search data.")
+
+    normalized_query = search_query.casefold()
+    registry = read_mod_registry()
+    results: list[dict[str, Any]] = []
+    for candidate in payload:
+        if not isinstance(candidate, dict):
+            continue
+        namespace = str(candidate.get("owner", "")).strip() or str(candidate.get("namespace", "")).strip()
+        package_name = str(candidate.get("name", "")).strip()
+        if not namespace or not package_name:
+            continue
+
+        latest_version_payload: dict[str, Any] | None = None
+        versions = candidate.get("versions")
+        if isinstance(versions, list):
+            for version_candidate in versions:
+                if isinstance(version_candidate, dict) and bool(version_candidate.get("is_active", True)):
+                    latest_version_payload = version_candidate
+                    break
+            if latest_version_payload is None:
+                for version_candidate in versions:
+                    if isinstance(version_candidate, dict):
+                        latest_version_payload = version_candidate
+                        break
+
+        latest_version = ""
+        description = str(candidate.get("description", "")).strip()
+        downloads = 0
+        if latest_version_payload is not None:
+            latest_version = str(latest_version_payload.get("version_number", "")).strip()
+            description = str(latest_version_payload.get("description", "")).strip() or description
+            try:
+                downloads = int(latest_version_payload.get("downloads", 0) or 0)
+            except (TypeError, ValueError):
+                downloads = 0
+
+        searchable_text = " ".join(
+            (
+                namespace,
+                package_name,
+                str(candidate.get("full_name", "")),
+                description,
+            )
+        ).casefold()
+        if normalized_query not in searchable_text:
+            continue
+
+        try:
+            rating_score = int(candidate.get("rating_score", 0) or 0)
+        except (TypeError, ValueError):
+            rating_score = 0
+
+        key = mod_key(provider, namespace, package_name)
+        already_installed = find_mod_entry(registry, key) is not None
+        results.append(
+            {
+                "namespace": namespace,
+                "name": package_name,
+                "version": latest_version,
+                "description": description,
+                "downloads": downloads,
+                "rating_score": rating_score,
+                "package_url": str(candidate.get("package_url", "")).strip(),
+                "installed": already_installed,
+            }
+        )
+
+    results.sort(
+        key=lambda item: (
+            bool(item.get("installed", False)),
+            -int(item.get("rating_score", 0)),
+            -int(item.get("downloads", 0)),
+            str(item.get("namespace", "")).casefold(),
+            str(item.get("name", "")).casefold(),
+        )
+    )
+    return results[:bounded_limit]
 
 
 def install_provider_mod_tree(
@@ -1864,6 +1986,40 @@ def create_app() -> Flask:
                 "max_players": MAX_PLAYERS,
             }
         )
+
+    @application.get("/api/mods/search")
+    @login_required
+    def api_mods_search():
+        provider = request.args.get("provider", "")
+        query = request.args.get("q", "")
+        limit_raw = request.args.get("limit", "25").strip()
+        try:
+            limit = int(limit_raw)
+        except ValueError:
+            return jsonify({"error": "Search limit must be a number."}), 400
+
+        try:
+            results = search_provider_packages(
+                provider,
+                MOD_DEFAULT_COMMUNITY,
+                query,
+                limit=limit,
+            )
+        except ValueError as error:
+            return jsonify({"error": str(error)}), 400
+        except RuntimeError as error:
+            return jsonify({"error": str(error)}), 502
+
+        response = jsonify(
+            {
+                "provider": provider,
+                "community": MOD_DEFAULT_COMMUNITY,
+                "query": query.strip(),
+                "results": results,
+            }
+        )
+        response.headers["Cache-Control"] = "no-store"
+        return response
 
     @application.post("/player/<platform_id>/ban")
     @login_required

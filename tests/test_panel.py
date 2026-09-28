@@ -365,6 +365,85 @@ class PanelIntegrationTests(unittest.TestCase):
         self.assertIn("thunderstore--rootteam--rootmod", keys)
         self.assertIn("thunderstore--depteam--depmod", keys)
 
+    def test_provider_fetch_uses_fallback_when_frontend_forbidden(self) -> None:
+        call_urls: list[str] = []
+        original_http_get_json = self.module.http_get_json
+
+        def fake_http_get_json(url, *, timeout=30):
+            call_urls.append(url)
+            if "/api/experimental/frontend/" in url:
+                raise RuntimeError("Could not reach provider API: HTTP Error 403: Forbidden")
+            if "/api/experimental/package/" in url:
+                return {
+                    "latest": {
+                        "version_number": "1.2.3",
+                        "download_url": "https://thunderstore.io/package/download/RootTeam/RootMod/1.2.3/",
+                        "dependencies": [],
+                    }
+                }
+            raise AssertionError(f"Unexpected URL: {url}")
+
+        self.module.http_get_json = fake_http_get_json
+        try:
+            payload = self.module.fetch_provider_package(
+                "thunderstore",
+                "valheim",
+                "RootTeam",
+                "RootMod",
+                "",
+            )
+        finally:
+            self.module.http_get_json = original_http_get_json
+
+        self.assertEqual(payload["version"], "1.2.3")
+        self.assertIn("/api/experimental/frontend/", call_urls[0])
+        self.assertTrue(any("/api/experimental/package/" in url for url in call_urls))
+
+    def test_mod_search_api_returns_results(self) -> None:
+        self.login()
+        original_search = self.module.search_provider_packages
+        captured: dict[str, object] = {}
+
+        def fake_search(provider, community, query, *, limit=25):
+            captured["provider"] = provider
+            captured["community"] = community
+            captured["query"] = query
+            captured["limit"] = limit
+            return [
+                {
+                    "namespace": "RandyKnapp",
+                    "name": "EpicLoot",
+                    "version": "0.10.4",
+                    "description": "Loot progression",
+                    "downloads": 1234,
+                    "rating_score": 200,
+                    "package_url": "https://thunderstore.io/c/valheim/p/RandyKnapp/EpicLoot/",
+                    "installed": False,
+                }
+            ]
+
+        self.module.search_provider_packages = fake_search
+        try:
+            response = self.client.get("/api/mods/search?provider=thunderstore&q=RandyKnapp&limit=7")
+        finally:
+            self.module.search_provider_packages = original_search
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload["community"], "valheim")
+        self.assertEqual(payload["query"], "RandyKnapp")
+        self.assertEqual(payload["results"][0]["namespace"], "RandyKnapp")
+        self.assertEqual(captured["provider"], "thunderstore")
+        self.assertEqual(captured["query"], "RandyKnapp")
+        self.assertEqual(captured["limit"], 7)
+
+    def test_mod_search_api_rejects_short_query(self) -> None:
+        self.login()
+        response = self.client.get("/api/mods/search?provider=thunderstore&q=r")
+        self.assertEqual(response.status_code, 400)
+        payload = response.get_json()
+        self.assertIn("at least 2 characters", payload["error"])
+
     def test_status_api(self) -> None:
         self.login()
         response = self.client.get("/api/status")

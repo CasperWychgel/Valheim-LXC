@@ -212,9 +212,160 @@
     }
   };
 
+  const setupModSearch = () => {
+    const searchRoot = document.querySelector("[data-mod-search]");
+    if (!searchRoot) return;
+    const submitButton = searchRoot.querySelector("[data-mod-search-submit]");
+    const queryInput = searchRoot.querySelector("input[name='search_query']");
+    const status = searchRoot.querySelector("[data-mod-search-status]");
+    const resultsTable = searchRoot.querySelector("[data-mod-search-results]");
+    const providerSelect = document.querySelector("form[action$='/mods/install/provider'] select[name='provider']");
+    if (!submitButton || !queryInput || !status || !resultsTable || !providerSelect) return;
+
+    const clearResultRows = () => {
+      resultsTable.querySelectorAll("[data-mod-search-row]").forEach((row) => row.remove());
+    };
+
+    const setStatus = (message, level = "") => {
+      status.textContent = message;
+      status.classList.remove("error", "success");
+      if (level) status.classList.add(level);
+    };
+
+    const renderResults = (provider, query, results) => {
+      clearResultRows();
+      if (!results.length) {
+        resultsTable.classList.add("hidden");
+        setStatus(`No packages found for "${query}".`, "");
+        return;
+      }
+
+      const csrfToken = searchRoot.dataset.csrf || "";
+      results.forEach((item) => {
+        const row = element("div", "table-row");
+        row.dataset.modSearchRow = "";
+
+        const packageCell = element("span");
+        packageCell.append(element("strong", "", `${item.namespace}-${item.name}`));
+        packageCell.append(element("small", "", item.description || "No description available."));
+        row.append(packageCell);
+
+        const latestCell = element("span");
+        latestCell.append(element("strong", "", item.version || "latest"));
+        latestCell.append(element("small", "", `${Number(item.downloads || 0).toLocaleString()} downloads`));
+        row.append(latestCell);
+
+        const signalsCell = element("span");
+        signalsCell.append(element("strong", "", `Score ${Number(item.rating_score || 0)}`));
+        signalsCell.append(element("small", "", item.installed ? "Already installed" : "Not installed"));
+        row.append(signalsCell);
+
+        const actionsCell = element("span", "table-actions");
+        const installForm = document.createElement("form");
+        installForm.method = "post";
+        installForm.action = "/mods/install/provider";
+        installForm.dataset.busy = "Downloading and installing mods...";
+        [
+          ["csrf_token", csrfToken],
+          ["provider", provider],
+          ["namespace", item.namespace],
+          ["package_name", item.name],
+          ["version", item.version || ""],
+        ].forEach(([name, value]) => {
+          const input = document.createElement("input");
+          input.type = "hidden";
+          input.name = name;
+          input.value = value;
+          installForm.append(input);
+        });
+        const installButton = element(
+          "button",
+          "text-button",
+          item.installed ? "Reinstall latest" : "Install latest",
+        );
+        installButton.type = "submit";
+        installForm.append(installButton);
+        actionsCell.append(installForm);
+
+        if (item.package_url) {
+          const packageLink = document.createElement("a");
+          packageLink.href = item.package_url;
+          packageLink.target = "_blank";
+          packageLink.rel = "noopener noreferrer";
+          packageLink.textContent = "View";
+          actionsCell.append(packageLink);
+        }
+
+        row.append(actionsCell);
+        resultsTable.append(row);
+      });
+
+      resultsTable.classList.remove("hidden");
+      setStatus(
+        `Found ${results.length} package${results.length === 1 ? "" : "s"} on ${provider}.`,
+        "success",
+      );
+    };
+
+    const search = async () => {
+      const query = queryInput.value.trim();
+      if (query.length < 2) {
+        clearResultRows();
+        resultsTable.classList.add("hidden");
+        setStatus("Enter at least 2 characters to search.", "error");
+        return;
+      }
+
+      const provider = providerSelect.value;
+      const providerLabel = providerSelect.options[providerSelect.selectedIndex]?.textContent || provider;
+      const searchUrl = `/api/mods/search?provider=${encodeURIComponent(provider)}&q=${encodeURIComponent(query)}&limit=25`;
+      const previousText = submitButton.textContent;
+      submitButton.disabled = true;
+      submitButton.textContent = "Searching...";
+      setStatus("Searching provider catalog...", "");
+      try {
+        const response = await fetch(searchUrl, {
+          headers: {"Accept": "application/json"},
+          cache: "no-store",
+        });
+        let payload = {};
+        try {
+          payload = await response.json();
+        } catch (_) {
+          payload = {};
+        }
+        if (!response.ok) {
+          const message = typeof payload.error === "string" ? payload.error : "Search failed.";
+          throw new Error(message);
+        }
+        const results = Array.isArray(payload.results) ? payload.results : [];
+        renderResults(provider, query, results);
+        setStatus(
+          `Found ${results.length} package${results.length === 1 ? "" : "s"} on ${providerLabel}.`,
+          "success",
+        );
+      } catch (error) {
+        clearResultRows();
+        resultsTable.classList.add("hidden");
+        setStatus(error instanceof Error ? error.message : "Search failed.", "error");
+      } finally {
+        submitButton.disabled = false;
+        submitButton.textContent = previousText;
+      }
+    };
+
+    submitButton.addEventListener("click", search);
+    queryInput.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter") return;
+      event.preventDefault();
+      search();
+    });
+  };
+
   updateStatus();
   updatePublicStatus();
   updatePlayers();
+  setupModSearch();
   window.setInterval(updateStatus, 5000);
   window.setInterval(updatePublicStatus, 10000);
   window.setInterval(updatePlayers, 10000);

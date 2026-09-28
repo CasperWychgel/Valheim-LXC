@@ -178,6 +178,16 @@ input[type="file"]::file-selector-button { margin-right: 10px; padding: 5px 9px;
 .backup-import-card p { max-width: 760px; margin-bottom: 8px; }
 .backup-upload-form { grid-template-columns: minmax(220px, 1fr) auto; }
 .upload-form { display: grid; grid-template-columns: minmax(160px, 1fr) minmax(160px, 1fr) auto; align-items: end; gap: 10px; min-width: min(100%, 620px); }
+.mod-search { display: grid; gap: 10px; padding: 14px; border: 1px solid var(--line-soft); border-radius: 10px; background: rgba(11, 15, 12, .35); }
+.mod-search h3 { margin: 0; font-size: .95rem; }
+.mod-search-controls { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: 10px; }
+.mod-search-controls .button { min-width: 150px; }
+.mod-search-hint, .mod-search-manual { margin: 0; color: var(--muted); font-size: .72rem; }
+.mod-search-status { min-height: 1.1em; margin: 0; color: var(--muted); font-size: .75rem; }
+.mod-search-status.error { color: #ffd2cf; }
+.mod-search-status.success { color: #c7efd5; }
+.mod-search-table .table-row { grid-template-columns: minmax(160px, 1.5fr) minmax(92px, .7fr) minmax(92px, .7fr) minmax(205px, 1fr); min-height: 56px; }
+.mod-search-table .table-actions { gap: 10px; }
 
 .count-badge, .active-label, .warning-label { display: inline-flex; align-items: center; width: max-content; padding: 3px 7px; border-radius: 99px; font-size: .64rem; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }
 .count-badge { flex: 0 0 auto; color: var(--muted); border: 1px solid var(--line); white-space: nowrap; }
@@ -303,6 +313,8 @@ input[type="file"]::file-selector-button { margin-right: 10px; padding: 5px 9px;
   .upload-form { grid-template-columns: 1fr; }
   .compact-upload-form, .legacy-upload-form, .backup-upload-form { grid-template-columns: 1fr; }
   .legacy-upload-form .button { grid-column: auto; }
+  .mod-search-controls { grid-template-columns: 1fr; }
+  .mod-search-controls .button { width: 100%; }
   .world-table { min-width: 0; overflow: visible; }
   .world-table .table-head { display: none; }
   .world-table .table-row { grid-template-columns: 1fr; min-height: 0; padding: 14px; }

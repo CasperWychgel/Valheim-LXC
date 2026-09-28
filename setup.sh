@@ -20,13 +20,15 @@ GAME_PORT=${GAME_PORT:-2456}
 PANEL_USERNAME=${PANEL_USERNAME:-admin}
 PANEL_PASSWORD=${PANEL_PASSWORD:-}
 PANEL_PORT=${PANEL_PORT:-2460}
+BEPINEX_VERSION=${BEPINEX_VERSION:-5.4.23.2}
+BEPINEX_URL=${BEPINEX_URL:-https://github.com/BepInEx/BepInEx/releases/download/v${BEPINEX_VERSION}/BepInEx_linux_x64_${BEPINEX_VERSION}.zip}
 
 green='\033[1;32m'
 yellow='\033[1;33m'
 red='\033[1;31m'
 reset='\033[0m'
 step=0
-total_steps=9
+total_steps=10
 
 say() { step=$((step + 1)); printf "%b[%s/%s]%b %s\n" "$green" "$step" "$total_steps" "$reset" "$*"; }
 die() { printf "%bError:%b %s\n" "$red" "$reset" "$*" >&2; exit 1; }
@@ -104,6 +106,13 @@ install -d -o valheim -g valheim-admin -m 2770 \
   "$VALHEIM_HOME/server" \
   "$VALHEIM_HOME/data" \
   "$VALHEIM_HOME/data/worlds_local" \
+  "$VALHEIM_HOME/data/mods" \
+  "$VALHEIM_HOME/data/mods/plugins" \
+  "$VALHEIM_HOME/data/mods/plugins-disabled" \
+  "$VALHEIM_HOME/data/mods/patchers" \
+  "$VALHEIM_HOME/data/mods/patchers-disabled" \
+  "$VALHEIM_HOME/data/mods/config" \
+  "$VALHEIM_HOME/data/mods/cache" \
   "$VALHEIM_HOME/backups" \
   "$VALHEIM_HOME/logs" \
   "$VALHEIM_HOME/bin"
@@ -164,6 +173,46 @@ for sdk_bits in 32 64; do
   fi
 done
 
+say "Installing BepInEx runtime and managed mod paths"
+if [[ ! -f $VALHEIM_HOME/server/BepInEx/core/BepInEx.Preloader.dll ]]; then
+  bepinex_archive=$(mktemp)
+  if ! curl --retry 3 --retry-delay 2 --connect-timeout 15 -fsSL \
+    "$BEPINEX_URL" -o "$bepinex_archive"; then
+    rm -f "$bepinex_archive"
+    die "Could not download BepInEx from $BEPINEX_URL."
+  fi
+  chown valheim:valheim-admin "$bepinex_archive"
+  chmod 0600 "$bepinex_archive"
+  if ! runuser -u valheim -- unzip -oq "$bepinex_archive" -d "$VALHEIM_HOME/server"; then
+    rm -f "$bepinex_archive"
+    die "BepInEx could not be extracted into $VALHEIM_HOME/server."
+  fi
+  rm -f "$bepinex_archive"
+fi
+
+if [[ ! -x $VALHEIM_HOME/server/run_bepinex.sh ]]; then
+  die "BepInEx is missing run_bepinex.sh after extraction."
+fi
+
+ensure_bepinex_link() {
+  local source=$1 target=$2
+  install -d -o valheim -g valheim-admin -m 2770 "$target"
+  if [[ -d $source && ! -L $source ]]; then
+    find "$source" -mindepth 1 -maxdepth 1 -exec mv -n -t "$target" -- {} + 2>/dev/null || true
+    rm -rf "$source"
+  elif [[ -e $source && ! -L $source ]]; then
+    rm -f "$source"
+  fi
+  ln -sfn "$target" "$source"
+  chown -h valheim:valheim-admin "$source"
+}
+
+ensure_bepinex_link "$VALHEIM_HOME/server/BepInEx/plugins" "$VALHEIM_HOME/data/mods/plugins"
+ensure_bepinex_link "$VALHEIM_HOME/server/BepInEx/patchers" "$VALHEIM_HOME/data/mods/patchers"
+ensure_bepinex_link "$VALHEIM_HOME/server/BepInEx/config" "$VALHEIM_HOME/data/mods/config"
+chown -R valheim:valheim-admin "$VALHEIM_HOME/server/BepInEx" "$VALHEIM_HOME/data/mods"
+chmod 0750 "$VALHEIM_HOME/server/run_bepinex.sh"
+
 say "Writing the server configuration and maintenance tools"
 SERVER_CONFIG_CREATED=0
 if [[ ! -f /etc/valheim/server.env ]]; then
@@ -196,6 +245,7 @@ NO_BUILD_COST="0"
 PLAYER_EVENTS="0"
 PASSIVE_MOBS="0"
 NO_MAP="0"
+MODS_ENABLED="0"
 EOF
   } >/etc/valheim/server.env
 fi
@@ -224,6 +274,7 @@ set -Eeuo pipefail
 : "${BACKUPS:=4}"
 : "${BACKUP_SHORT:=7200}"
 : "${BACKUP_LONG:=43200}"
+: "${MODS_ENABLED:=0}"
 
 cd /opt/valheim/server
 export HOME=/opt/valheim
@@ -259,6 +310,10 @@ args=(
 
 printf 'Starting Valheim: name=%q world=%q port=%q public=%q crossplay=%q\n' \
   "$SERVER_NAME" "$WORLD_NAME" "$GAME_PORT" "$PUBLIC" "$CROSSPLAY"
+if [[ ${MODS_ENABLED:-0} == 1 && -x ./run_bepinex.sh ]]; then
+  printf 'Starting with BepInEx mod loader enabled.\n'
+  exec ./run_bepinex.sh ./valheim_server.x86_64 "${args[@]}"
+fi
 exec ./valheim_server.x86_64 "${args[@]}"
 EOF
 
@@ -271,7 +326,8 @@ timestamp=$(date -u +%Y%m%dT%H%M%SZ)
 target="$backup_dir/valheim-$timestamp.tar.gz"
 temporary="$target.partial"
 install -d -o valheim -g valheim-admin -m 2770 "$backup_dir"
-tar -czf "$temporary" -C "$source_dir" worlds_local adminlist.txt bannedlist.txt permittedlist.txt
+tar -czf "$temporary" -C "$source_dir" \
+  worlds_local adminlist.txt bannedlist.txt permittedlist.txt mods
 mv "$temporary" "$target"
 chown valheim:valheim-admin "$target"
 chmod 0660 "$target"

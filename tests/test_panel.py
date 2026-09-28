@@ -171,6 +171,15 @@ class PanelIntegrationTests(unittest.TestCase):
         result.seek(0)
         return result
 
+    @staticmethod
+    def mod_zip_bytes(mod_name: str = "SampleMod") -> io.BytesIO:
+        return PanelIntegrationTests.zip_bytes(
+            {
+                f"BepInEx/plugins/{mod_name}/{mod_name}.dll": b"synthetic plugin",
+                f"BepInEx/config/{mod_name}.cfg": b"## sample config\n",
+            }
+        )
+
     @classmethod
     def backup_bytes(cls, world_name: str = "ArchiveRealm") -> io.BytesIO:
         world_files = {
@@ -229,11 +238,132 @@ class PanelIntegrationTests(unittest.TestCase):
 
     def test_all_panel_tabs_render(self) -> None:
         self.login()
-        for tab in ("overview", "players", "settings", "access", "worlds", "backups", "logs", "security"):
+        for tab in ("overview", "players", "settings", "access", "worlds", "backups", "logs", "mods", "security"):
             with self.subTest(tab=tab):
                 response = self.client.get(f"/?tab={tab}")
                 self.assertEqual(response.status_code, 200)
                 self.assertIn(b"Valheim Admin", response.data)
+
+    def test_mod_runtime_toggle(self) -> None:
+        self.login()
+        response = self.client.post(
+            "/mods/settings",
+            data={"csrf_token": self.csrf(), "MODS_ENABLED": "1"},
+            follow_redirects=True,
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"Mod runtime setting saved", response.data)
+        self.assertEqual(self.module.read_settings()["MODS_ENABLED"], "1")
+
+    def test_manual_mod_upload_toggle_and_uninstall(self) -> None:
+        self.login()
+        response = self.client.post(
+            "/mods/upload",
+            data={
+                "csrf_token": self.csrf(),
+                "package_name": "ManualPack",
+                "mod_archive": (self.mod_zip_bytes("ManualPack"), "ManualPack.zip"),
+            },
+            content_type="multipart/form-data",
+            follow_redirects=True,
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"Uploaded and installed", response.data)
+
+        registry = json.loads((self.data / "mods" / "registry.json").read_text(encoding="utf-8"))
+        self.assertEqual(len(registry["mods"]), 1)
+        mod_key = registry["mods"][0]["key"]
+        self.assertTrue((self.data / "mods" / "plugins" / mod_key).is_dir())
+
+        response = self.client.post(
+            f"/mods/toggle/{mod_key}",
+            data={"csrf_token": self.csrf(), "action": "disable"},
+            follow_redirects=True,
+        )
+        self.assertEqual(response.status_code, 200)
+        registry = json.loads((self.data / "mods" / "registry.json").read_text(encoding="utf-8"))
+        self.assertFalse(registry["mods"][0]["enabled"])
+        self.assertTrue((self.data / "mods" / "plugins-disabled" / mod_key).is_dir())
+
+        response = self.client.post(
+            f"/mods/toggle/{mod_key}",
+            data={"csrf_token": self.csrf(), "action": "enable"},
+            follow_redirects=True,
+        )
+        self.assertEqual(response.status_code, 200)
+        registry = json.loads((self.data / "mods" / "registry.json").read_text(encoding="utf-8"))
+        self.assertTrue(registry["mods"][0]["enabled"])
+        self.assertTrue((self.data / "mods" / "plugins" / mod_key).is_dir())
+
+        response = self.client.post(
+            f"/mods/uninstall/{mod_key}",
+            data={"csrf_token": self.csrf()},
+            follow_redirects=True,
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"Removed ManualPack", response.data)
+        registry = json.loads((self.data / "mods" / "registry.json").read_text(encoding="utf-8"))
+        self.assertEqual(registry["mods"], [])
+
+    def test_provider_mod_install_resolves_dependencies(self) -> None:
+        self.login()
+        original_fetch = self.module.fetch_provider_package
+        original_download = self.module.http_download_file
+
+        def fake_fetch(provider, community, namespace, name, version):
+            if namespace == "RootTeam" and name == "RootMod":
+                return {
+                    "provider": provider,
+                    "community": community,
+                    "namespace": namespace,
+                    "name": name,
+                    "version": "1.0.0",
+                    "download_url": "https://example.invalid/root.zip",
+                    "dependencies": [("DepTeam", "DepMod", "2.0.0")],
+                }
+            if namespace == "DepTeam" and name == "DepMod":
+                return {
+                    "provider": provider,
+                    "community": community,
+                    "namespace": namespace,
+                    "name": name,
+                    "version": "2.0.0",
+                    "download_url": "https://example.invalid/dep.zip",
+                    "dependencies": [],
+                }
+            raise ValueError("unexpected package request")
+
+        def fake_download(url, destination, *, timeout=90):
+            if "dep.zip" in url:
+                payload = self.mod_zip_bytes("DepMod").getvalue()
+            else:
+                payload = self.mod_zip_bytes("RootMod").getvalue()
+            destination.write_bytes(payload)
+
+        self.module.fetch_provider_package = fake_fetch
+        self.module.http_download_file = fake_download
+        try:
+            response = self.client.post(
+                "/mods/install/provider",
+                data={
+                    "csrf_token": self.csrf(),
+                    "provider": "thunderstore",
+                    "namespace": "RootTeam",
+                    "package_name": "RootMod",
+                    "version": "",
+                },
+                follow_redirects=True,
+            )
+        finally:
+            self.module.fetch_provider_package = original_fetch
+            self.module.http_download_file = original_download
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"Installed packages", response.data)
+        registry = json.loads((self.data / "mods" / "registry.json").read_text(encoding="utf-8"))
+        keys = {entry["key"] for entry in registry["mods"]}
+        self.assertIn("thunderstore--rootteam--rootmod", keys)
+        self.assertIn("thunderstore--depteam--depmod", keys)
 
     def test_status_api(self) -> None:
         self.login()
@@ -666,6 +796,25 @@ class PanelIntegrationTests(unittest.TestCase):
         )
         self.assertIn(b"outside the portable backup layout", response.data)
         self.assertFalse((self.backups / backup_name).exists())
+
+    def test_portable_backup_validation_accepts_managed_mods(self) -> None:
+        backup_name = "valheim-20260203T010203Z.tar.gz"
+        files = {
+            f"worlds_local/{name}": content
+            for name, content in self.archive_files("ModdedRealm", generation=5).items()
+        }
+        files.update(
+            {
+                "adminlist.txt": b"// Synthetic test data\n",
+                "bannedlist.txt": b"// Synthetic test data\n",
+                "permittedlist.txt": b"// Synthetic test data\n",
+                "mods/plugins/testmod/TestMod.dll": b"plugin",
+            }
+        )
+        archive = self.backups / backup_name
+        archive.write_bytes(self.tar_bytes(files).getvalue())
+        metadata = self.module.validate_backup_archive(archive)
+        self.assertGreater(metadata["mod_files"], 0)
 
     def test_settings_cannot_bypass_safe_world_switching(self) -> None:
         self.login()

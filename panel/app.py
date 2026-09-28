@@ -23,6 +23,9 @@ import subprocess
 import tarfile
 import tempfile
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
@@ -51,6 +54,19 @@ DATA_DIR = Path(os.environ.get("VALHEIM_DATA_DIR", str(VALHEIM_HOME / "data")))
 WORLD_DIR = Path(os.environ.get("VALHEIM_WORLD_DIR", str(DATA_DIR / "worlds_local")))
 BACKUP_DIR = Path(os.environ.get("VALHEIM_BACKUP_DIR", str(VALHEIM_HOME / "backups")))
 VALHEIM_LOG = Path(os.environ.get("VALHEIM_LOG", str(VALHEIM_HOME / "logs" / "valheim.log")))
+MOD_ROOT = Path(os.environ.get("VALHEIM_MOD_ROOT", str(DATA_DIR / "mods")))
+MOD_PLUGIN_DIR = Path(os.environ.get("VALHEIM_MOD_PLUGIN_DIR", str(MOD_ROOT / "plugins")))
+MOD_PLUGIN_DISABLED_DIR = Path(
+    os.environ.get("VALHEIM_MOD_PLUGIN_DISABLED_DIR", str(MOD_ROOT / "plugins-disabled"))
+)
+MOD_PATCHER_DIR = Path(os.environ.get("VALHEIM_MOD_PATCHER_DIR", str(MOD_ROOT / "patchers")))
+MOD_PATCHER_DISABLED_DIR = Path(
+    os.environ.get("VALHEIM_MOD_PATCHER_DISABLED_DIR", str(MOD_ROOT / "patchers-disabled"))
+)
+MOD_CONFIG_DIR = Path(os.environ.get("VALHEIM_MOD_CONFIG_DIR", str(MOD_ROOT / "config")))
+MOD_CACHE_DIR = Path(os.environ.get("VALHEIM_MOD_CACHE_DIR", str(MOD_ROOT / "cache")))
+MOD_REGISTRY = Path(os.environ.get("VALHEIM_MOD_REGISTRY", str(MOD_ROOT / "registry.json")))
+MOD_DEFAULT_COMMUNITY = os.environ.get("VALHEIM_MOD_COMMUNITY", "valheim")
 PLAYER_DB = Path(
     os.environ.get("VALHEIM_PLAYER_DB", "/var/lib/valheim-panel/players.sqlite3")
 )
@@ -83,6 +99,21 @@ MAX_PLAYERS = 10
 PLAYER_PARSER_VERSION = "2"
 MAX_ARCHIVE_MEMBERS = 200_000
 MAX_ARCHIVE_EXPANDED_BYTES = 8 * 1024 * 1024 * 1024
+MAX_DOWNLOAD_BYTES = 512 * 1024 * 1024
+
+MOD_PROVIDER_BASE_URLS = {
+    "thunderstore": "https://thunderstore.io",
+    "hexium": "https://hexium.gg",
+}
+MOD_PROVIDER_LABELS = {
+    "thunderstore": "Thunderstore",
+    "hexium": "Hexium",
+    "manual": "Manual upload",
+}
+MOD_TOKEN_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+MOD_VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+:-]{0,63}$")
+MOD_KEY_RE = re.compile(r"^[a-z0-9._-]+--[a-z0-9._-]+--[a-z0-9._-]+$")
+MOD_CONFIG_EXTENSIONS = {".cfg", ".json"}
 
 DEFAULT_SETTINGS = {
     "SERVER_NAME": "Valheim Dedicated Server",
@@ -105,6 +136,7 @@ DEFAULT_SETTINGS = {
     "PLAYER_EVENTS": "0",
     "PASSIVE_MOBS": "0",
     "NO_MAP": "0",
+    "MODS_ENABLED": "0",
 }
 
 PRESET_CHOICES = ["", "Normal", "Casual", "Easy", "Hard", "Hardcore", "Immersive", "Hammer"]
@@ -259,6 +291,555 @@ def control(action: str, *arguments: str, timeout: int = 900) -> str:
     if completed.returncode != 0:
         raise RuntimeError(output or f"{action.title()} failed.")
     return output
+
+
+def ensure_mod_layout() -> None:
+    for directory in (
+        MOD_ROOT,
+        MOD_PLUGIN_DIR,
+        MOD_PLUGIN_DISABLED_DIR,
+        MOD_PATCHER_DIR,
+        MOD_PATCHER_DISABLED_DIR,
+        MOD_CONFIG_DIR,
+        MOD_CACHE_DIR,
+    ):
+        directory.mkdir(parents=True, exist_ok=True)
+        try:
+            os.chmod(directory, 0o2770)
+        except OSError:
+            pass
+
+
+def read_json_file(path: Path, default: Any) -> Any:
+    if not path.exists():
+        return default
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def write_json_file(path: Path, payload: Any, mode: int = 0o660) -> None:
+    atomic_text_write(path, json.dumps(payload, indent=2, sort_keys=True) + "\n", mode=mode)
+
+
+def empty_mod_registry() -> dict[str, Any]:
+    return {"mods": []}
+
+
+def read_mod_registry() -> dict[str, Any]:
+    ensure_mod_layout()
+    registry = read_json_file(MOD_REGISTRY, empty_mod_registry())
+    mods = registry.get("mods")
+    if not isinstance(mods, list):
+        registry = empty_mod_registry()
+    return registry
+
+
+def write_mod_registry(registry: dict[str, Any]) -> None:
+    ensure_mod_layout()
+    mods = [
+        mod
+        for mod in registry.get("mods", [])
+        if isinstance(mod, dict)
+        and MOD_KEY_RE.fullmatch(str(mod.get("key", "")))
+        and str(mod.get("provider", "")) in MOD_PROVIDER_LABELS
+    ]
+    mods.sort(key=lambda item: str(item.get("name", "")).casefold())
+    write_json_file(MOD_REGISTRY, {"mods": mods})
+
+
+def normalize_mod_token(value: str, *, field: str) -> str:
+    token = value.strip()
+    if not MOD_TOKEN_RE.fullmatch(token):
+        raise ValueError(f"Invalid {field}. Use letters, numbers, dots, underscores, and hyphens.")
+    return token
+
+
+def normalize_mod_provider(value: str) -> str:
+    provider = value.strip().casefold()
+    if provider not in MOD_PROVIDER_BASE_URLS:
+        raise ValueError("Unknown mod provider.")
+    return provider
+
+
+def normalize_mod_version(value: str) -> str:
+    version = value.strip()
+    if not version:
+        return ""
+    if not MOD_VERSION_RE.fullmatch(version):
+        raise ValueError("The requested version contains unsupported characters.")
+    return version
+
+
+def mod_key(provider: str, namespace: str, name: str) -> str:
+    return f"{provider.lower()}--{namespace.lower()}--{name.lower()}"
+
+
+def find_mod_entry(registry: dict[str, Any], key: str) -> dict[str, Any] | None:
+    return next((mod for mod in registry.get("mods", []) if mod.get("key") == key), None)
+
+
+def remove_mod_entry(registry: dict[str, Any], key: str) -> None:
+    registry["mods"] = [mod for mod in registry.get("mods", []) if mod.get("key") != key]
+
+
+def add_mod_entry(registry: dict[str, Any], entry: dict[str, Any]) -> None:
+    remove_mod_entry(registry, str(entry["key"]))
+    registry.setdefault("mods", []).append(entry)
+
+
+def mod_paths(entry: dict[str, Any]) -> dict[str, Path]:
+    key = str(entry["key"])
+    return {
+        "plugin_active": MOD_PLUGIN_DIR / key,
+        "plugin_disabled": MOD_PLUGIN_DISABLED_DIR / key,
+        "patcher_active": MOD_PATCHER_DIR / key,
+        "patcher_disabled": MOD_PATCHER_DISABLED_DIR / key,
+        "config": MOD_CONFIG_DIR / key,
+    }
+
+
+def list_installed_mods() -> list[dict[str, Any]]:
+    registry = read_mod_registry()
+    mods = [mod.copy() for mod in registry.get("mods", []) if isinstance(mod, dict)]
+    mods.sort(key=lambda item: (str(item.get("provider", "")), str(item.get("name", "")).casefold()))
+    return mods
+
+
+def normalize_mod_tree(path: Path) -> None:
+    if not path.exists():
+        return
+    os.chmod(path, 0o2770)
+    for item in path.rglob("*"):
+        if item.is_symlink():
+            raise ValueError("Mod packages may not contain symbolic links.")
+        if item.is_dir():
+            os.chmod(item, 0o2770)
+        elif item.is_file():
+            os.chmod(item, 0o660)
+        else:
+            raise ValueError("The mod package contains an unsupported file type.")
+
+
+def move_if_exists(source: Path, destination: Path) -> None:
+    if not source.exists():
+        return
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if destination.exists():
+        if destination.is_dir() and not destination.is_symlink():
+            shutil.rmtree(destination)
+        else:
+            destination.unlink()
+    os.replace(source, destination)
+
+
+def apply_mod_enabled_state(entry: dict[str, Any], enabled: bool) -> None:
+    ensure_mod_layout()
+    paths = mod_paths(entry)
+    if enabled:
+        move_if_exists(paths["plugin_disabled"], paths["plugin_active"])
+        move_if_exists(paths["patcher_disabled"], paths["patcher_active"])
+    else:
+        move_if_exists(paths["plugin_active"], paths["plugin_disabled"])
+        move_if_exists(paths["patcher_active"], paths["patcher_disabled"])
+
+
+def remove_mod_payload(entry: dict[str, Any]) -> None:
+    paths = mod_paths(entry)
+    for key in ("plugin_active", "plugin_disabled", "patcher_active", "patcher_disabled", "config"):
+        candidate = paths[key]
+        if candidate.exists():
+            if candidate.is_dir() and not candidate.is_symlink():
+                shutil.rmtree(candidate)
+            else:
+                candidate.unlink()
+
+
+def classify_mod_payload(parts: tuple[str, ...]) -> tuple[str, tuple[str, ...]] | None:
+    lowered = [part.casefold() for part in parts]
+    for marker, bucket in (("plugins", "plugin"), ("patchers", "patcher"), ("config", "config")):
+        if marker in lowered:
+            index = lowered.index(marker)
+            relative = parts[index + 1 :]
+            if relative:
+                return bucket, relative
+    return None
+
+
+def copy_tree(source: Path, destination: Path) -> None:
+    destination.mkdir(parents=True, exist_ok=True)
+    for path in sorted(source.rglob("*"), key=lambda item: item.as_posix()):
+        relative = path.relative_to(source)
+        target = destination / relative
+        if path.is_dir():
+            target.mkdir(parents=True, exist_ok=True)
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if target.exists():
+            continue
+        shutil.copy2(path, target)
+
+
+def install_mod_archive(
+    registry: dict[str, Any],
+    *,
+    provider: str,
+    community: str,
+    namespace: str,
+    name: str,
+    version: str,
+    archive_path: Path,
+    dependencies: list[str],
+) -> dict[str, Any]:
+    ensure_mod_layout()
+    key = mod_key(provider, namespace, name)
+    existing = find_mod_entry(registry, key)
+    enabled = True if existing is None else bool(existing.get("enabled", True))
+
+    kind, _ = inspect_archive(archive_path)
+    with tempfile.TemporaryDirectory(dir=MOD_CACHE_DIR, prefix=".mod-install-") as temporary:
+        staging_root = Path(temporary)
+        extracted_root = staging_root / "extracted"
+        extract_checked_archive(archive_path, extracted_root, kind)
+
+        plugin_stage = staging_root / "plugin"
+        patcher_stage = staging_root / "patcher"
+        config_stage = staging_root / "config"
+        plugin_files = 0
+        patcher_files = 0
+
+        for path in sorted(extracted_root.rglob("*"), key=lambda item: item.as_posix()):
+            if path.is_dir() or path.is_symlink():
+                continue
+            classification = classify_mod_payload(path.relative_to(extracted_root).parts)
+            if not classification:
+                continue
+            bucket, relative = classification
+            if bucket == "plugin":
+                destination = plugin_stage / Path(*relative)
+                plugin_files += 1
+            elif bucket == "patcher":
+                destination = patcher_stage / Path(*relative)
+                patcher_files += 1
+            else:
+                destination = config_stage / Path(*relative)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(path, destination)
+
+        if plugin_files == 0 and patcher_files == 0:
+            raise ValueError("This package does not contain BepInEx plugins or patchers.")
+
+        if existing:
+            remove_mod_payload(existing)
+
+        entry = {
+            "key": key,
+            "provider": provider,
+            "provider_label": MOD_PROVIDER_LABELS[provider],
+            "community": community,
+            "namespace": namespace,
+            "name": name,
+            "version": version,
+            "enabled": enabled,
+            "dependencies": sorted({value for value in dependencies if MOD_KEY_RE.fullmatch(value)}),
+            "installed_at": datetime.now(timezone.utc).isoformat(),
+        }
+        paths = mod_paths(entry)
+        plugin_target = paths["plugin_active"] if enabled else paths["plugin_disabled"]
+        patcher_target = paths["patcher_active"] if enabled else paths["patcher_disabled"]
+        if plugin_stage.exists():
+            plugin_target.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(plugin_stage, plugin_target)
+            normalize_mod_tree(plugin_target)
+        if patcher_stage.exists():
+            patcher_target.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(patcher_stage, patcher_target)
+            normalize_mod_tree(patcher_target)
+        if config_stage.exists():
+            copy_tree(config_stage, paths["config"])
+            normalize_mod_tree(paths["config"])
+
+    add_mod_entry(registry, entry)
+    return entry
+
+
+def dependency_identifier_to_coordinates(raw: str) -> tuple[str, str, str] | None:
+    value = raw.strip()
+    if not value:
+        return None
+    parts = value.split("-")
+    if len(parts) < 3:
+        return None
+    namespace = parts[0]
+    version = parts[-1]
+    name = "-".join(parts[1:-1])
+    if not namespace or not name:
+        return None
+    return namespace, name, version
+
+
+def parse_provider_dependency(value: Any) -> tuple[str, str, str] | None:
+    if isinstance(value, str):
+        return dependency_identifier_to_coordinates(value)
+    if isinstance(value, dict):
+        namespace = str(value.get("namespace", "")).strip()
+        package_name = str(value.get("package_name", value.get("name", ""))).strip()
+        version = str(value.get("version_number", value.get("version", ""))).strip()
+        if namespace and package_name and version:
+            return namespace, package_name, version
+    return None
+
+
+def http_get_json(url: str, *, timeout: int = 30) -> Any:
+    request_object = urllib.request.Request(
+        url,
+        headers={"User-Agent": "Valheim-LXC/1.0 (+https://github.com/FuBoByte/Valheim-LXC)"},
+    )
+    try:
+        with urllib.request.urlopen(request_object, timeout=timeout) as response:
+            payload = response.read().decode("utf-8")
+    except urllib.error.URLError as error:
+        raise RuntimeError(f"Could not reach provider API: {error}") from error
+    try:
+        return json.loads(payload)
+    except json.JSONDecodeError as error:
+        raise RuntimeError("Provider API returned invalid JSON.") from error
+
+
+def http_download_file(url: str, destination: Path, *, timeout: int = 90) -> None:
+    request_object = urllib.request.Request(
+        url,
+        headers={"User-Agent": "Valheim-LXC/1.0 (+https://github.com/FuBoByte/Valheim-LXC)"},
+    )
+    written = 0
+    try:
+        with urllib.request.urlopen(request_object, timeout=timeout) as response, destination.open("wb") as output:
+            while True:
+                chunk = response.read(1024 * 1024)
+                if not chunk:
+                    break
+                written += len(chunk)
+                if written > MAX_DOWNLOAD_BYTES:
+                    raise ValueError("The package download is too large.")
+                output.write(chunk)
+    except urllib.error.URLError as error:
+        raise RuntimeError(f"Could not download the package: {error}") from error
+    if written == 0:
+        raise ValueError("The package download is empty.")
+
+
+def fetch_provider_package(
+    provider: str,
+    community: str,
+    namespace: str,
+    name: str,
+    version: str,
+) -> dict[str, Any]:
+    base_url = MOD_PROVIDER_BASE_URLS[provider]
+    encoded_community = urllib.parse.quote(community, safe="")
+    encoded_namespace = urllib.parse.quote(namespace, safe="")
+    encoded_name = urllib.parse.quote(name, safe="")
+
+    details_url = (
+        f"{base_url}/api/experimental/frontend/c/{encoded_community}/p/{encoded_namespace}/{encoded_name}/"
+    )
+    details = http_get_json(details_url)
+    versions = details.get("versions") if isinstance(details, dict) else None
+    if not isinstance(versions, list) or not versions:
+        fallback_url = f"{base_url}/api/experimental/package/{encoded_namespace}/{encoded_name}/"
+        details = http_get_json(fallback_url)
+        versions = [details.get("latest", {})] if isinstance(details, dict) else []
+    if not versions:
+        raise ValueError("The requested package has no published versions.")
+
+    selected_version = version
+    if not selected_version:
+        selected_version = str(versions[0].get("version_number", "")).strip()
+    for candidate in versions:
+        if str(candidate.get("version_number", "")).strip() == selected_version:
+            selected = candidate
+            break
+    else:
+        raise ValueError(f"Version {selected_version} is not available for this package.")
+
+    dependencies: list[tuple[str, str, str]] = []
+    for raw_dependency in selected.get("dependencies", []):
+        parsed = parse_provider_dependency(raw_dependency)
+        if parsed:
+            dependencies.append(parsed)
+
+    download_url = str(selected.get("download_url", "")).strip()
+    if not download_url:
+        download_url = f"{base_url}/package/download/{namespace}/{name}/{selected_version}/"
+
+    return {
+        "provider": provider,
+        "community": community,
+        "namespace": namespace,
+        "name": name,
+        "version": selected_version,
+        "download_url": download_url,
+        "dependencies": dependencies,
+    }
+
+
+def install_provider_mod_tree(
+    provider: str,
+    community: str,
+    namespace: str,
+    name: str,
+    version: str,
+) -> list[str]:
+    ensure_mod_layout()
+    provider = normalize_mod_provider(provider)
+    community = normalize_mod_token(community, field="community")
+    namespace = normalize_mod_token(namespace, field="namespace")
+    name = normalize_mod_token(name, field="package name")
+    version = normalize_mod_version(version)
+
+    registry = read_mod_registry()
+    visiting: set[str] = set()
+    installed: list[str] = []
+
+    def install_one(current_namespace: str, current_name: str, current_version: str) -> str:
+        key = mod_key(provider, current_namespace, current_name)
+        if key in visiting:
+            return key
+        visiting.add(key)
+        package = fetch_provider_package(
+            provider,
+            community,
+            current_namespace,
+            current_name,
+            current_version,
+        )
+        dependency_keys: list[str] = []
+        for dep_namespace, dep_name, dep_version in package["dependencies"]:
+            dependency_keys.append(install_one(dep_namespace, dep_name, dep_version))
+
+        existing = find_mod_entry(registry, key)
+        if existing and str(existing.get("version", "")) == package["version"]:
+            if not bool(existing.get("enabled", True)):
+                apply_mod_enabled_state(existing, True)
+                existing["enabled"] = True
+            existing["dependencies"] = sorted(set(dependency_keys))
+            visiting.remove(key)
+            installed.append(f"{current_namespace}-{current_name} {package['version']} (already installed)")
+            return key
+
+        suffix = Path(urllib.parse.urlparse(package["download_url"]).path).name.casefold()
+        extension = ".zip"
+        if suffix.endswith(".tar.gz"):
+            extension = ".tar.gz"
+        elif suffix.endswith(".tgz"):
+            extension = ".tgz"
+        with tempfile.TemporaryDirectory(dir=MOD_CACHE_DIR, prefix=".provider-download-") as temporary:
+            archive_path = Path(temporary) / f"package{extension}"
+            http_download_file(package["download_url"], archive_path)
+            install_mod_archive(
+                registry,
+                provider=provider,
+                community=community,
+                namespace=current_namespace,
+                name=current_name,
+                version=package["version"],
+                archive_path=archive_path,
+                dependencies=dependency_keys,
+            )
+        visiting.remove(key)
+        installed.append(f"{current_namespace}-{current_name} {package['version']}")
+        return key
+
+    install_one(namespace, name, version)
+    write_mod_registry(registry)
+    return installed
+
+
+def install_uploaded_mod(archive_path: Path, package_name: str) -> dict[str, Any]:
+    ensure_mod_layout()
+    normalized_name = normalize_mod_token(package_name, field="package name")
+    registry = read_mod_registry()
+    entry = install_mod_archive(
+        registry,
+        provider="manual",
+        community="manual",
+        namespace="local",
+        name=normalized_name,
+        version=datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S"),
+        archive_path=archive_path,
+        dependencies=[],
+    )
+    write_mod_registry(registry)
+    return entry
+
+
+def set_mod_enabled(key: str, enabled: bool) -> dict[str, Any]:
+    registry = read_mod_registry()
+    entry = find_mod_entry(registry, key)
+    if not entry:
+        raise ValueError("Mod not found.")
+    apply_mod_enabled_state(entry, enabled)
+    entry["enabled"] = enabled
+    write_mod_registry(registry)
+    return entry
+
+
+def uninstall_mod(key: str) -> dict[str, Any]:
+    registry = read_mod_registry()
+    entry = find_mod_entry(registry, key)
+    if not entry:
+        raise ValueError("Mod not found.")
+    remove_mod_payload(entry)
+    remove_mod_entry(registry, key)
+    write_mod_registry(registry)
+    return entry
+
+
+def list_mod_config_files() -> list[str]:
+    ensure_mod_layout()
+    if not MOD_CONFIG_DIR.exists():
+        return []
+    files: list[str] = []
+    for path in sorted(MOD_CONFIG_DIR.rglob("*"), key=lambda item: item.as_posix()):
+        if not path.is_file() or path.is_symlink():
+            continue
+        if path.suffix.casefold() not in MOD_CONFIG_EXTENSIONS:
+            continue
+        files.append(path.relative_to(MOD_CONFIG_DIR).as_posix())
+    return files
+
+
+def safe_mod_config_path(relative_path: str) -> Path:
+    if not relative_path:
+        raise ValueError("Choose a config file first.")
+    candidate = (MOD_CONFIG_DIR / relative_path).resolve()
+    try:
+        candidate.relative_to(MOD_CONFIG_DIR.resolve())
+    except ValueError as error:
+        raise ValueError("The selected config path is invalid.") from error
+    if candidate.suffix.casefold() not in MOD_CONFIG_EXTENSIONS:
+        raise ValueError("Only .cfg and .json mod config files can be edited here.")
+    if not candidate.is_file() or candidate.is_symlink():
+        raise ValueError("The selected config file does not exist.")
+    return candidate
+
+
+def read_mod_config_file(relative_path: str) -> str:
+    path = safe_mod_config_path(relative_path)
+    return path.read_text(encoding="utf-8", errors="replace")
+
+
+def write_mod_config_file(relative_path: str, content: str) -> None:
+    path = safe_mod_config_path(relative_path)
+    atomic_text_write(path, content, mode=0o660)
+
+
+def mod_log_excerpt(max_lines: int = 160) -> str:
+    if not VALHEIM_LOG.exists():
+        return "No Valheim log file found yet."
+    lines = VALHEIM_LOG.read_text(encoding="utf-8", errors="replace").splitlines()
+    mod_lines = [line for line in lines if "bepinex" in line.casefold() or "[plugin" in line.casefold()]
+    relevant = mod_lines if mod_lines else lines
+    excerpt = relevant[-max_lines:]
+    return "\n".join(excerpt) if excerpt else "No mod-related log lines have been recorded yet."
 
 
 def service_active() -> bool:
@@ -768,12 +1349,12 @@ def validate_backup_archive(path: Path) -> dict[str, Any]:
     kind, entries = inspect_archive(path, allow_zip=False)
     if kind != "tar":
         raise ValueError("Portable server backups must use .tar.gz.")
-    allowed_roots = {"worlds_local", *ACCESS_FILES.values()}
+    allowed_roots = {"worlds_local", "mods", *ACCESS_FILES.values()}
     for entry in entries:
         root = entry["parts"][0]
         if root not in allowed_roots:
             raise ValueError("The archive contains files outside the portable backup layout.")
-        if root != "worlds_local" and (len(entry["parts"]) != 1 or entry["is_dir"]):
+        if root not in {"worlds_local", "mods"} and (len(entry["parts"]) != 1 or entry["is_dir"]):
             raise ValueError("The archive contains an invalid access-list path.")
 
     regular_names = {entry["name"] for entry in entries if not entry["is_dir"]}
@@ -810,10 +1391,12 @@ def validate_backup_archive(path: Path) -> dict[str, Any]:
     ]
     if not modern_worlds and not legacy_worlds:
         raise ValueError("The archive does not contain a complete playable world.")
+    mod_entries = [entry for entry in entries if entry["parts"][0] == "mods" and not entry["is_dir"]]
     return {
         "entries": entries,
         "modern_worlds": sorted(modern_worlds),
         "legacy_worlds": sorted(legacy_worlds),
+        "mod_files": len(mod_entries),
     }
 
 
@@ -977,7 +1560,7 @@ def read_access(name: str) -> str:
     filename = ACCESS_FILES.get(name)
     if not filename:
         abort(404)
-    path = DATA_DIR / filename
+    path = DATA_DIR / str(filename)
     return path.read_text(encoding="utf-8") if path.exists() else ""
 
 
@@ -1213,6 +1796,7 @@ def create_app() -> Flask:
             "worlds",
             "backups",
             "logs",
+            "mods",
             "security",
         }:
             tab = "overview"
@@ -1222,6 +1806,22 @@ def create_app() -> Flask:
                 logs = control("logs", timeout=20)
             except RuntimeError as error:
                 logs = str(error)
+        selected_mod_config = ""
+        selected_mod_content = ""
+        mod_configs: list[str] = []
+        mods: list[dict[str, Any]] = []
+        mod_logs = ""
+        if tab == "mods":
+            mods = list_installed_mods()
+            mod_logs = mod_log_excerpt()
+            mod_configs = list_mod_config_files()
+            selected_mod_config = request.args.get("config", "")
+            if selected_mod_config and selected_mod_config in mod_configs:
+                try:
+                    selected_mod_content = read_mod_config_file(selected_mod_config)
+                except ValueError:
+                    selected_mod_config = ""
+                    selected_mod_content = ""
         return render_template(
             "dashboard.html",
             tab=tab,
@@ -1235,6 +1835,16 @@ def create_app() -> Flask:
             worlds=list_worlds() if tab == "worlds" else [],
             backups=list_backups() if tab == "backups" else [],
             logs=logs,
+            mods=mods,
+            mod_logs=mod_logs,
+            mod_configs=mod_configs,
+            mod_selected_config=selected_mod_config,
+            mod_selected_content=selected_mod_content,
+            mod_default_community=MOD_DEFAULT_COMMUNITY,
+            mod_providers=[
+                {"key": provider, "label": MOD_PROVIDER_LABELS[provider]}
+                for provider in ("thunderstore", "hexium")
+            ],
             service_since=service_since(),
         )
 
@@ -1294,6 +1904,113 @@ def create_app() -> Flask:
             flash(str(error), "error")
         return redirect(url_for("dashboard", tab="settings"))
 
+    @application.post("/mods/settings")
+    @login_required
+    def mods_settings_save():
+        try:
+            settings = read_settings()
+            settings["MODS_ENABLED"] = "1" if request.form.get("MODS_ENABLED") == "1" else "0"
+            write_settings(settings)
+            flash("Mod runtime setting saved. Restart the server to apply this change.", "success")
+        except (ValueError, OSError) as error:
+            flash(str(error), "error")
+        return redirect(url_for("dashboard", tab="mods"))
+
+    @application.post("/mods/install/provider")
+    @login_required
+    def mods_install_provider():
+        try:
+            provider = request.form.get("provider", "")
+            namespace = request.form.get("namespace", "")
+            package_name = request.form.get("package_name", "")
+            version = request.form.get("version", "")
+            installed = install_provider_mod_tree(
+                provider,
+                MOD_DEFAULT_COMMUNITY,
+                namespace,
+                package_name,
+                version,
+            )
+            flash(
+                "Installed packages: " + ", ".join(installed) + ". Restart Valheim to load new mods.",
+                "success",
+            )
+        except (RuntimeError, ValueError, OSError, tarfile.TarError, zipfile.BadZipFile) as error:
+            flash(str(error), "error")
+        return redirect(url_for("dashboard", tab="mods"))
+
+    @application.post("/mods/upload")
+    @login_required
+    def mods_upload():
+        upload = request.files.get("mod_archive")
+        filename = secure_filename(upload.filename or "") if upload else ""
+        if not upload or not filename.casefold().endswith((".zip", ".tar.gz", ".tgz")):
+            flash("Select a mod archive in .zip, .tar.gz, or .tgz format.", "error")
+            return redirect(url_for("dashboard", tab="mods"))
+        package_name = request.form.get("package_name", "").strip()
+        if not package_name:
+            package_name = Path(filename).name.replace(".tar.gz", "").replace(".tgz", "").replace(".zip", "")
+        try:
+            ensure_mod_layout()
+            with tempfile.TemporaryDirectory(dir=MOD_CACHE_DIR, prefix=".mod-upload-") as temporary:
+                extension = ".zip"
+                if filename.casefold().endswith(".tar.gz"):
+                    extension = ".tar.gz"
+                elif filename.casefold().endswith(".tgz"):
+                    extension = ".tgz"
+                archive_path = Path(temporary) / f"upload{extension}"
+                upload.save(archive_path)
+                entry = install_uploaded_mod(archive_path, package_name)
+            flash(
+                f"Uploaded and installed {entry['name']}. Restart Valheim to load this mod.",
+                "success",
+            )
+        except (ValueError, OSError, tarfile.TarError, zipfile.BadZipFile) as error:
+            flash(str(error), "error")
+        return redirect(url_for("dashboard", tab="mods"))
+
+    @application.post("/mods/toggle/<key>")
+    @login_required
+    def mods_toggle(key: str):
+        if not MOD_KEY_RE.fullmatch(key):
+            abort(404)
+        action_name = request.form.get("action", "")
+        if action_name not in {"enable", "disable"}:
+            abort(400, "Unknown mod action.")
+        try:
+            entry = set_mod_enabled(key, action_name == "enable")
+            flash(
+                f"{entry['name']} is now {'enabled' if entry['enabled'] else 'disabled'}. Restart Valheim to apply.",
+                "success",
+            )
+        except (ValueError, OSError) as error:
+            flash(str(error), "error")
+        return redirect(url_for("dashboard", tab="mods"))
+
+    @application.post("/mods/uninstall/<key>")
+    @login_required
+    def mods_uninstall(key: str):
+        if not MOD_KEY_RE.fullmatch(key):
+            abort(404)
+        try:
+            entry = uninstall_mod(key)
+            flash(f"Removed {entry['name']}.", "success")
+        except (ValueError, OSError) as error:
+            flash(str(error), "error")
+        return redirect(url_for("dashboard", tab="mods"))
+
+    @application.post("/mods/config/save")
+    @login_required
+    def mods_config_save():
+        relative_path = request.form.get("path", "")
+        content = request.form.get("content", "")
+        try:
+            write_mod_config_file(relative_path, content)
+            flash(f"Saved {relative_path}.", "success")
+        except (ValueError, OSError) as error:
+            flash(str(error), "error")
+        return redirect(url_for("dashboard", tab="mods", config=relative_path))
+
     @application.post("/access/<name>")
     @login_required
     def access_save(name: str):
@@ -1302,7 +2019,7 @@ def create_app() -> Flask:
             abort(404)
         try:
             content = validate_access(request.form.get("entries", ""))
-            atomic_text_write(DATA_DIR / filename, content)
+            atomic_text_write(DATA_DIR / str(filename), content)
             flash(f"{name.title()} saved.", "success")
         except (ValueError, OSError) as error:
             flash(str(error), "error")

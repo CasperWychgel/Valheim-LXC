@@ -24,7 +24,8 @@
         <a class="{{ 'active' if tab == 'worlds' }}" href="{{ url_for('dashboard', tab='worlds') }}"><span>05</span>Worlds</a>
         <a class="{{ 'active' if tab == 'backups' }}" href="{{ url_for('dashboard', tab='backups') }}"><span>06</span>Backups</a>
         <a class="{{ 'active' if tab == 'logs' }}" href="{{ url_for('dashboard', tab='logs') }}"><span>07</span>Logs</a>
-        <a class="{{ 'active' if tab == 'security' }}" href="{{ url_for('dashboard', tab='security') }}"><span>08</span>Security</a>
+        <a class="{{ 'active' if tab == 'mods' }}" href="{{ url_for('dashboard', tab='mods') }}"><span>08</span>Mods</a>
+        <a class="{{ 'active' if tab == 'security' }}" href="{{ url_for('dashboard', tab='security') }}"><span>09</span>Security</a>
       </nav>
       <div class="sidebar-footer">
         <div class="mini-status">
@@ -42,7 +43,7 @@
       <header class="topbar">
         <div>
           <p class="eyebrow">Valheim Dedicated Server</p>
-          <h1>{{ {'overview':'Overview','players':'Player activity','settings':'Server settings','access':'Access control','worlds':'World library','backups':'Backup vault','logs':'Service logs','security':'Panel security'}[tab] }}</h1>
+          <h1>{{ {'overview':'Overview','players':'Player activity','settings':'Server settings','access':'Access control','worlds':'World library','backups':'Backup vault','logs':'Service logs','mods':'Mod control','security':'Panel security'}[tab] }}</h1>
         </div>
         <div class="topbar-status">
           <span class="status-dot {{ 'online' if status.active else 'offline' }}" data-status-dot></span>
@@ -291,7 +292,7 @@
       {% elif tab == 'backups' %}
         <section class="panel-card intro-card">
           <div><p class="eyebrow">Archive policy</p><h2>Portable server snapshots</h2></div>
-          <div class="inline-actions"><p>Archives include worlds and all three access lists. The newest 30 are retained.</p><form method="post" action="{{ url_for('action', action='backup') }}" data-busy="Creating archive…"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="button primary" type="submit">Back up now</button></form></div>
+          <div class="inline-actions"><p>Archives include worlds, all three access lists, and managed mods. The newest 30 are retained.</p><form method="post" action="{{ url_for('action', action='backup') }}" data-busy="Creating archive…"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="button primary" type="submit">Back up now</button></form></div>
         </section>
         <section class="panel-card backup-import-card">
           <div><p class="eyebrow">Server data restore</p><h2>Upload a portable backup</h2><p>Upload an original <code>valheim-YYYYMMDDTHHMMSSZ.tar.gz</code> archive. It is validated and added to the vault first; restoring remains a separate confirmed action.</p><small>Restores worlds and access lists. Server name, password, network settings, and panel credentials remain unchanged.</small></div>
@@ -317,6 +318,98 @@
         <section class="panel-card log-card">
           <div class="card-heading"><div><p class="eyebrow">Last 250 journal entries</p><h2>Valheim service log</h2></div><a class="button" href="{{ url_for('dashboard', tab='logs') }}">Refresh</a></div>
           <pre>{{ logs }}</pre>
+        </section>
+
+      {% elif tab == 'mods' %}
+        <section class="panel-card intro-card">
+          <div><p class="eyebrow">BepInEx stack</p><h2>Server mod management</h2></div>
+          <p>Install mods from Thunderstore or Hexium, upload custom packages, and edit generated mod configs. Changes are stored in managed paths and can be included in portable backups.</p>
+        </section>
+
+        <section class="three-column">
+          <form method="post" action="{{ url_for('mods_settings_save') }}" class="panel-card form-stack">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <div><p class="eyebrow">Runtime</p><h2>Enable mod loader</h2><p>When disabled, Valheim starts without BepInEx.</p></div>
+            <label class="toggle"><input type="checkbox" name="MODS_ENABLED" value="1" {{ 'checked' if settings.MODS_ENABLED == '1' }}><span></span><b>Enable BepInEx at startup<small>Requires a server restart to apply.</small></b></label>
+            <button class="button primary" type="submit">Save runtime setting</button>
+          </form>
+
+          <form method="post" action="{{ url_for('mods_install_provider') }}" class="panel-card form-stack" data-busy="Downloading and installing mods…">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <div><p class="eyebrow">Provider install</p><h2>Install from catalog</h2><p>Dependencies are resolved and installed automatically.</p></div>
+            <label><span>Provider</span><select name="provider">{% for provider in mod_providers %}<option value="{{ provider.key }}">{{ provider.label }}</option>{% endfor %}</select></label>
+            <label><span>Community</span><input value="{{ mod_default_community }}" disabled><small>Using <code>{{ mod_default_community }}</code> community scope.</small></label>
+            <label><span>Namespace</span><input name="namespace" placeholder="AuthorName" required></label>
+            <label><span>Package name</span><input name="package_name" placeholder="ModName" required></label>
+            <label><span>Version (optional)</span><input name="version" placeholder="latest"></label>
+            <button class="button primary" type="submit">Install package</button>
+          </form>
+
+          <form method="post" action="{{ url_for('mods_upload') }}" enctype="multipart/form-data" class="panel-card form-stack" data-busy="Uploading and installing archive…">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <div><p class="eyebrow">Manual install</p><h2>Upload custom package</h2><p>Accepts .zip, .tar.gz, and .tgz archives containing BepInEx plugins or patchers.</p></div>
+            <label><span>Archive</span><input type="file" name="mod_archive" accept=".zip,.tar.gz,.tgz,application/zip,application/gzip" required></label>
+            <label><span>Package alias</span><input name="package_name" placeholder="Optional friendly name"></label>
+            <button class="button" type="submit">Upload and install</button>
+          </form>
+        </section>
+
+        <section class="panel-card table-card">
+          <div class="card-heading"><div><p class="eyebrow">Installed packages</p><h2>Managed mods</h2></div><span class="count-badge">{{ mods|length }} mod{% if mods|length != 1 %}s{% endif %}</span></div>
+          {% if mods %}
+            <div class="data-table backup-table">
+              <div class="table-row table-head"><span>Package</span><span>Source</span><span>Version</span><span>Status</span><span>Actions</span></div>
+              {% for mod in mods %}
+                <div class="table-row">
+                  <span><strong>{{ mod.namespace }}-{{ mod.name }}</strong><small>{{ mod.installed_at }}</small></span>
+                  <span>{{ mod.provider_label }}</span>
+                  <span>{{ mod.version }}</span>
+                  <span><span class="status-label {{ 'online' if mod.enabled else 'offline' }}">{{ 'Enabled' if mod.enabled else 'Disabled' }}</span></span>
+                  <span class="table-actions">
+                    <form method="post" action="{{ url_for('mods_toggle', key=mod.key) }}">
+                      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                      <input type="hidden" name="action" value="{{ 'disable' if mod.enabled else 'enable' }}">
+                      <button class="text-button" type="submit">{{ 'Disable' if mod.enabled else 'Enable' }}</button>
+                    </form>
+                    <form method="post" action="{{ url_for('mods_uninstall', key=mod.key) }}" data-confirm="Uninstall {{ mod.namespace }}-{{ mod.name }}?">
+                      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                      <button class="text-button danger" type="submit">Uninstall</button>
+                    </form>
+                  </span>
+                </div>
+              {% endfor %}
+            </div>
+          {% else %}
+            <div class="empty-state"><strong>No managed mods yet</strong><p>Install a package from a provider or upload an archive to get started.</p></div>
+          {% endif %}
+        </section>
+
+        <section class="split-grid">
+          <article class="panel-card">
+            <div class="card-heading"><div><p class="eyebrow">Config editor</p><h2>Mod config files</h2></div></div>
+            {% if mod_configs %}
+              <form method="get" action="{{ url_for('dashboard') }}" class="form-stack">
+                <input type="hidden" name="tab" value="mods">
+                <label><span>Config file</span><select name="config">{% for config_path in mod_configs %}<option value="{{ config_path }}" {{ 'selected' if config_path == mod_selected_config else '' }}>{{ config_path }}</option>{% endfor %}</select></label>
+                <button class="button" type="submit">Load file</button>
+              </form>
+              {% if mod_selected_config %}
+                <form method="post" action="{{ url_for('mods_config_save') }}" class="form-stack">
+                  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                  <input type="hidden" name="path" value="{{ mod_selected_config }}">
+                  <textarea name="content" rows="18" spellcheck="false">{{ mod_selected_content }}</textarea>
+                  <button class="button primary" type="submit">Save config</button>
+                </form>
+              {% endif %}
+            {% else %}
+              <div class="empty-state"><strong>No editable config files yet</strong><p>Configs appear after mod plugins generate .cfg or .json files.</p></div>
+            {% endif %}
+          </article>
+
+          <article class="panel-card log-card">
+            <div class="card-heading"><div><p class="eyebrow">Startup evidence</p><h2>Mod log excerpt</h2></div></div>
+            <pre>{{ mod_logs }}</pre>
+          </article>
         </section>
 
       {% elif tab == 'security' %}

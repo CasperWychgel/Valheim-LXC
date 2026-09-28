@@ -58,7 +58,7 @@ After installation you get:
 Open the shell of your Proxmox VE node, become `root`, and run:
 
 ```bash
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/FuBoByte/Valheim-LXC/main/install.sh)"
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/CasperWychgel/Valheim-LXC/main/install.sh)"
 ```
 
 The installer asks for the container name, network, disk size, CPU, and memory.
@@ -196,7 +196,7 @@ This is the easiest and most isolated route. The installer:
 ### Interactive installation
 
 ```bash
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/FuBoByte/Valheim-LXC/main/install.sh)"
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/CasperWychgel/Valheim-LXC/main/install.sh)"
 ```
 
 You will be asked for:
@@ -215,7 +215,7 @@ panel ports can be supplied through command-line flags or environment variables.
 
 ```bash
 curl -fsSLo /tmp/valheim-lxc-install.sh \
-  https://raw.githubusercontent.com/FuBoByte/Valheim-LXC/main/install.sh
+  https://raw.githubusercontent.com/CasperWychgel/Valheim-LXC/main/install.sh
 less /tmp/valheim-lxc-install.sh
 bash /tmp/valheim-lxc-install.sh
 ```
@@ -223,7 +223,7 @@ bash /tmp/valheim-lxc-install.sh
 ### Install from a local checkout
 
 ```bash
-git clone https://github.com/FuBoByte/Valheim-LXC.git
+git clone https://github.com/CasperWychgel/Valheim-LXC.git
 cd Valheim-LXC
 chmod +x install.sh
 ./install.sh
@@ -273,7 +273,7 @@ Download the script first so you can supply a secure game password:
 
 ```bash
 curl -fsSLo /tmp/valheim-setup.sh \
-  https://raw.githubusercontent.com/FuBoByte/Valheim-LXC/main/setup.sh
+  https://raw.githubusercontent.com/CasperWychgel/Valheim-LXC/main/setup.sh
 
 sudo SERVER_NAME="My Valheim Realm" \
   WORLD_NAME="Dedicated" \
@@ -338,7 +338,7 @@ Run the current setup again. Existing game and panel configuration is retained:
 
 ```bash
 # Inside the Debian system or LXC
-curl -fsSL https://raw.githubusercontent.com/FuBoByte/Valheim-LXC/main/setup.sh \
+curl -fsSL https://raw.githubusercontent.com/CasperWychgel/Valheim-LXC/main/setup.sh \
   | sudo bash
 ```
 
@@ -346,7 +346,7 @@ From a Proxmox host, replace `101` with the correct container ID:
 
 ```bash
 pct exec 101 -- bash -lc \
-  'curl -fsSL https://raw.githubusercontent.com/FuBoByte/Valheim-LXC/main/setup.sh | bash'
+  'curl -fsSL https://raw.githubusercontent.com/CasperWychgel/Valheim-LXC/main/setup.sh | bash'
 ```
 
 ## Troubleshooting
@@ -505,7 +505,7 @@ the maintainers' intent; it does not restrict the permissions granted by MIT,
 including commercial use.
 
 Contributions and focused bug reports are welcome through the repository's
-[GitHub issue tracker](https://github.com/FuBoByte/Valheim-LXC/issues).
+[GitHub issue tracker](https://github.com/CasperWychgel/Valheim-LXC/issues).
 
 ### References
 

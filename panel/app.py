@@ -591,7 +591,7 @@ def parse_provider_dependency(value: Any) -> tuple[str, str, str] | None:
 def http_get_json(url: str, *, timeout: int = 30) -> Any:
     request_object = urllib.request.Request(
         url,
-        headers={"User-Agent": "Valheim-LXC/1.0 (+https://github.com/FuBoByte/Valheim-LXC)"},
+        headers={"User-Agent": "Valheim-LXC/1.0 (+https://github.com/CasperWychgel/Valheim-LXC)"},
     )
     try:
         with urllib.request.urlopen(request_object, timeout=timeout) as response:
@@ -607,7 +607,7 @@ def http_get_json(url: str, *, timeout: int = 30) -> Any:
 def http_download_file(url: str, destination: Path, *, timeout: int = 90) -> None:
     request_object = urllib.request.Request(
         url,
-        headers={"User-Agent": "Valheim-LXC/1.0 (+https://github.com/FuBoByte/Valheim-LXC)"},
+        headers={"User-Agent": "Valheim-LXC/1.0 (+https://github.com/CasperWychgel/Valheim-LXC)"},
     )
     written = 0
     try:

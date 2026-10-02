@@ -230,6 +230,26 @@ export HOME=/opt/valheim
 export SteamAppId=892970
 export LD_LIBRARY_PATH="/opt/valheim/server/linux64:${LD_LIBRARY_PATH:-}"
 
+bepinex_root=/opt/valheim/server/BepInEx
+doorstop_dir=/opt/valheim/server/doorstop_libs
+doorstop_lib="$doorstop_dir/libdoorstop_x64.so"
+preloader_dll="$bepinex_root/core/BepInEx.Preloader.dll"
+
+if [[ -f "$doorstop_lib" && -f "$preloader_dll" ]]; then
+  export DOORSTOP_ENABLED=1
+  export DOORSTOP_TARGET_ASSEMBLY="$preloader_dll"
+  export LD_LIBRARY_PATH="$doorstop_dir:${LD_LIBRARY_PATH}"
+  export LD_PRELOAD="libdoorstop_x64.so${LD_PRELOAD:+:$LD_PRELOAD}"
+  bepinex_state=enabled
+else
+  # Ensure vanilla start when BepInEx files are missing or incomplete.
+  unset DOORSTOP_ENABLED DOORSTOP_TARGET_ASSEMBLY
+  bepinex_state=disabled
+  if [[ -d "$bepinex_root" || -d "$doorstop_dir" ]]; then
+    printf 'BepInEx files look incomplete; starting vanilla without Doorstop.\n' >&2
+  fi
+fi
+
 args=(
   -nographics
   -batchmode
@@ -257,8 +277,8 @@ args=(
 [[ ${PASSIVE_MOBS:-0} == 1 ]] && args+=(-setkey passivemobs)
 [[ ${NO_MAP:-0} == 1 ]] && args+=(-setkey nomap)
 
-printf 'Starting Valheim: name=%q world=%q port=%q public=%q crossplay=%q\n' \
-  "$SERVER_NAME" "$WORLD_NAME" "$GAME_PORT" "$PUBLIC" "$CROSSPLAY"
+printf 'Starting Valheim: name=%q world=%q port=%q public=%q crossplay=%q bepinex=%q\n' \
+  "$SERVER_NAME" "$WORLD_NAME" "$GAME_PORT" "$PUBLIC" "$CROSSPLAY" "$bepinex_state"
 exec ./valheim_server.x86_64 "${args[@]}"
 EOF
 

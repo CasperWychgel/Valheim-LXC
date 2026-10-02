@@ -9,7 +9,7 @@ if [[ -n ${BASH_SOURCE[0]:-} && -f ${BASH_SOURCE[0]:-} ]]; then
   SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 fi
 SOURCE_DIR=${SOURCE_DIR:-$SCRIPT_DIR}
-DEFAULT_REPO_RAW="https://raw.githubusercontent.com/FuBoByte/Valheim-LXC/main"
+DEFAULT_REPO_RAW="https://raw.githubusercontent.com/CasperWychgel/Valheim-LXC/server-mod-startup"
 REPO_RAW=${REPO_RAW:-$DEFAULT_REPO_RAW}
 REPO_RAW=${REPO_RAW%/}
 APP_ID=896660

@@ -5,7 +5,7 @@ set -Eeuo pipefail
 
 PROJECT_NAME="Valheim LXC"
 REQUIRED_ARCH="amd64"
-DEFAULT_REPO_RAW="https://raw.githubusercontent.com/FuBoByte/Valheim-LXC/main"
+DEFAULT_REPO_RAW="https://raw.githubusercontent.com/CasperWychgel/Valheim-LXC/server-mod-startup"
 REPO_RAW=${REPO_RAW:-$DEFAULT_REPO_RAW}
 REPO_RAW=${REPO_RAW%/}
 CTID=${CTID:-}
